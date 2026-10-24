@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+.tools/
+.scratch/
+artifacts/
+data/
+*.db
+*.db-shm
+*.db-wal
+.vs/
+ghidra_12.1.4_PUBLIC/
+# Local reverse-engineering work may contain proprietary game state and credentials.
+re/

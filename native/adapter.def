@@ -1,0 +1,3 @@
+LIBRARY "HeroesPost.Native.dll"
+EXPORTS
+    HeroesPostInitialize=_HeroesPostInitialize@4

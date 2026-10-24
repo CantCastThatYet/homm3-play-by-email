@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HeroesLobby.Contracts/HeroesLobby.Contracts.csproj" />
+    <Project Path="src/HeroesLobby.Desktop/HeroesLobby.Desktop.csproj" />
+    <Project Path="src/HeroesLobby.NativeHost/HeroesLobby.NativeHost.csproj" />
+    <Project Path="src/HeroesLobby.Server/HeroesLobby.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HeroesLobby.Tests/HeroesLobby.Tests.csproj" />
+  </Folder>
+</Solution>

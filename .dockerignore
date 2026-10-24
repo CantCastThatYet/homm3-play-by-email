@@ -1,0 +1,12 @@
+**/bin
+**/obj
+**/*.db*
+.git
+.tools
+.scratch
+artifacts
+data
+re
+ghidra_12.1.4_PUBLIC
+tests
+src/HeroesLobby.Desktop

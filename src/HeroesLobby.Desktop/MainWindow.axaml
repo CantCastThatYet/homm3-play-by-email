@@ -1,0 +1,98 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:HeroesLobby.Desktop" x:Class="HeroesLobby.Desktop.MainWindow"
+        Title="Heroes Post" Width="1240" Height="850" MinWidth="1060" MinHeight="740">
+  <Grid ColumnDefinitions="250,*" RowDefinitions="*,Auto">
+    <Border Grid.RowSpan="2" Background="#14221E" BorderBrush="#2A3C32" BorderThickness="0,0,1,0" Padding="22,28">
+      <Grid RowDefinitions="Auto,Auto,*,Auto">
+        <StackPanel Spacing="7">
+          <TextBlock Text="H / P" Foreground="#D2B575" FontSize="33" FontWeight="Light" LetterSpacing="5"/>
+          <TextBlock Text="HEROES POST" FontWeight="SemiBold" FontSize="18" LetterSpacing="2"/>
+          <TextBlock Text="A place for the next turn." Classes="muted" FontSize="12"/>
+        </StackPanel>
+        <StackPanel Grid.Row="1" Margin="0,42,0,0" Spacing="12">
+          <TextBlock Text="YOUR CONNECTION" Classes="eyebrow"/>
+          <StackPanel><TextBlock Text="Server address" Classes="label"/><TextBox x:Name="ServerAddress" PlaceholderText="https://your-server.example"/></StackPanel>
+          <StackPanel><TextBlock Text="Player name" Classes="label"/><TextBox x:Name="PlayerName" PlaceholderText="How friends know you" MaxLength="32"/></StackPanel>
+          <Button x:Name="ConnectButton" Content="Connect to server" Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="ConnectClick"/>
+          <TextBlock x:Name="ConnectionState" Text="Not connected" Classes="muted" TextWrapping="Wrap" FontSize="12"/>
+          <Button x:Name="NativeSetupButton" Content="Set up HotA" Click="NativeSetupClick"/>
+          <TextBlock x:Name="NativeStatus" Text="Set up HotA to launch games from this lobby." Classes="muted" FontSize="12" TextWrapping="Wrap"/>
+          <Border BorderBrush="#304138" BorderThickness="0,1,0,0" Margin="0,8,0,0" Padding="0,16,0,0">
+            <StackPanel Spacing="8"><TextBlock Text="Your seat stays yours" FontWeight="SemiBold"/><TextBlock Text="Closing the app or disconnecting keeps your place in every lobby." Classes="muted" TextWrapping="Wrap" FontSize="12" LineHeight="19"/></StackPanel>
+          </Border>
+        </StackPanel>
+        <StackPanel Grid.Row="3" Spacing="9"><TextBlock Text="BRING YOUR OWN SERVER" Classes="eyebrow" FontSize="10"/><TextBlock Text="Independent communities.&#10;One familiar gathering place." Classes="muted" FontSize="12" LineHeight="20"/></StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Column="1" Margin="30,27,30,18" RowDefinitions="Auto,Auto,Auto,*">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Spacing="8"><TextBlock Text="THE GATHERING HALL" Classes="eyebrow"/><TextBlock Text="Make room for adventure." FontSize="30" FontWeight="SemiBold"/><TextBlock x:Name="ServerName" Text="Connect to your community, then choose a game." Classes="muted"/></StackPanel>
+        <Button Grid.Column="1" x:Name="CreateButton" Content="＋  Create game" Classes="primary" IsEnabled="False" VerticalAlignment="Center" Click="CreateClick"/>
+      </Grid>
+      <Border Grid.Row="1" x:Name="MessagePanel" IsVisible="False" Background="#49372B" CornerRadius="8" Padding="14,10" Margin="0,18,0,0">
+        <Grid ColumnDefinitions="*,Auto"><TextBlock x:Name="MessageText" TextWrapping="Wrap" Foreground="#F8DCA8" VerticalAlignment="Center"/><Button Grid.Column="1" Content="×" Classes="quiet" Padding="10,2" Click="DismissClick"/></Grid>
+      </Border>
+      <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,22,0,14">
+        <TextBlock x:Name="GameCount" Text="GAME DIRECTORY" Classes="eyebrow" VerticalAlignment="Center"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12"><CheckBox x:Name="MineOnly" Content="My games" IsEnabled="False" IsCheckedChanged="FilterChanged"/><Button x:Name="RefreshButton" Content="Refresh" Classes="quiet" IsEnabled="False" Click="RefreshClick"/></StackPanel>
+      </Grid>
+      <Grid Grid.Row="3" ColumnDefinitions="*,20,1.08*">
+        <Border Classes="card" Padding="12">
+          <Grid RowDefinitions="Auto,*">
+            <TextBox x:Name="Search" PlaceholderText="Search games or maps…" Margin="0,0,0,14" TextChanged="SearchChanged"/>
+            <ListBox Grid.Row="1" x:Name="GameList" Background="Transparent" BorderThickness="0" SelectionChanged="SelectionChanged">
+              <ListBox.ItemTemplate><DataTemplate x:DataType="local:GameRow">
+                <Border Padding="16,16" Background="#203229" CornerRadius="8">
+                  <StackPanel Spacing="9">
+                    <Grid ColumnDefinitions="*,Auto"><TextBlock Text="{Binding Name}" FontSize="17" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Grid.Column="1" Text="{Binding SeatCount}" Foreground="#D2B575" Margin="12,0,0,0"/></Grid>
+                    <TextBlock Text="{Binding Map}" Classes="muted" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                    <Grid ColumnDefinitions="*,Auto"><TextBlock Text="{Binding Status}" Foreground="#9DCAA8" FontSize="11"/><TextBlock Grid.Column="1" Text="{Binding Access}" Classes="muted" FontSize="11"/></Grid>
+                  </StackPanel>
+                </Border>
+              </DataTemplate></ListBox.ItemTemplate>
+            </ListBox>
+            <StackPanel Grid.Row="1" x:Name="EmptyList" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="250" Spacing="12" Margin="12">
+              <TextBlock Text="◇" FontSize="42" Foreground="#C6AB70" HorizontalAlignment="Center"/>
+              <TextBlock x:Name="EmptyTitle" Text="The hall awaits" FontSize="20" HorizontalAlignment="Center"/>
+              <TextBlock x:Name="EmptyDescription" Text="Connect to a server to see its games." Classes="muted" TextWrapping="Wrap" TextAlignment="Center"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <Border Grid.Column="2" Classes="card" Padding="22">
+          <Grid>
+            <StackPanel x:Name="NoSelection" VerticalAlignment="Center" Spacing="12"><TextBlock Text="A campaign starts with company." FontSize="23" TextWrapping="Wrap"/><TextBlock Text="Choose a game to see the map, available seats, and your friends’ starting preferences." Classes="muted" TextWrapping="Wrap" LineHeight="22"/></StackPanel>
+            <ScrollViewer x:Name="DetailsScroll" IsVisible="False" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel x:Name="Details" Spacing="15">
+                <StackPanel Spacing="7"><TextBlock x:Name="DetailStatus" Classes="eyebrow"/><TextBlock x:Name="DetailTitle" FontSize="25" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock x:Name="DetailMap" Classes="muted" TextWrapping="Wrap"/></StackPanel>
+                <Border Background="#263B30" CornerRadius="6" Padding="10"><TextBlock x:Name="DetailHint" FontSize="12" TextWrapping="Wrap" Foreground="#C4D5C6"/></Border>
+                <ItemsControl x:Name="Members"><ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MemberRow">
+                  <Grid ColumnDefinitions="12,*,Auto" Margin="0,5">
+                    <Border Background="{Binding ColorBrush}" Width="6" Height="30" CornerRadius="3" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="1" Margin="7,0,10,0" Spacing="3"><TextBlock Text="{Binding Name}" FontWeight="SemiBold"/><TextBlock Text="{Binding Preferences}" Classes="muted" FontSize="11" TextWrapping="Wrap"/></StackPanel>
+                    <TextBlock Grid.Column="2" Text="{Binding Ready}" Foreground="#C6AB70" FontSize="11" VerticalAlignment="Center"/>
+                  </Grid>
+                </DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+                <Button x:Name="JoinButton" Content="Join this game" Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="JoinClick"/>
+                <StackPanel x:Name="SettingsPanel" Spacing="10" IsVisible="False">
+                  <Border BorderBrush="#35483F" BorderThickness="0,1,0,0" Padding="0,16,0,0"><TextBlock Text="YOUR STARTING PREFERENCES" Classes="eyebrow" FontSize="10"/></Border>
+                  <Grid ColumnDefinitions="*,12,*"><StackPanel><TextBlock Text="Player color" Classes="label"/><ComboBox x:Name="ColorChoice"/></StackPanel><StackPanel Grid.Column="2"><TextBlock Text="Town" Classes="label"/><ComboBox x:Name="FactionChoice"/></StackPanel></Grid>
+                  <Grid ColumnDefinitions="*,12,*"><StackPanel><TextBlock Text="Hero preference" Classes="label"/><TextBox x:Name="HeroChoice" MaxLength="40"/></StackPanel><StackPanel Grid.Column="2"><TextBlock Text="Starting bonus" Classes="label"/><ComboBox x:Name="BonusChoice"/></StackPanel></Grid>
+                  <TextBlock Text="HotA startup currently uses Red/Blue and Random town, hero and bonus. The map supplies its starting defaults." Classes="muted" FontSize="11" TextWrapping="Wrap"/>
+                  <Grid ColumnDefinitions="*,12,*"><Button x:Name="SaveSettingsButton" Content="Save preferences" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="SettingsClick"/><Button Grid.Column="2" x:Name="ReadyButton" Content="Mark ready" Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="ReadyClick"/></Grid>
+                </StackPanel>
+                <StackPanel x:Name="MemberActions" IsVisible="False" Spacing="8">
+                  <Button x:Name="ResumeGameButton" Content="Resume HotA" Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="ResumeGameClick" IsVisible="False"/>
+                  <Button x:Name="StartGameButton" Content="Start HotA" Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="StartGameClick"/>
+                  <Button x:Name="LockButton" Content="Lock ready lobby" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="LockClick"/>
+                  <Button x:Name="LeaveButton" Content="Leave game and release my seat" Classes="quiet" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="LeaveClick"/>
+                </StackPanel>
+              </StackPanel>
+            </ScrollViewer>
+          </Grid>
+        </Border>
+      </Grid>
+    </Grid>
+    <Border Grid.Column="1" Grid.Row="1" BorderBrush="#2A3C32" BorderThickness="0,1,0,0" Padding="30,12">
+      <Grid ColumnDefinitions="*,Auto"><TextBlock Text="Solo resume prototype · Next-day merging and turn notifications are not implemented yet." Classes="muted" FontSize="11"/><TextBlock Grid.Column="1" Text="HEROES POST / 03" Classes="eyebrow" FontSize="10"/></Grid>
+    </Border>
+  </Grid>
+</Window>
