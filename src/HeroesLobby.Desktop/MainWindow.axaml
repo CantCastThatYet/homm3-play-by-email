@@ -82,6 +82,7 @@
                 <StackPanel x:Name="MemberActions" IsVisible="False" Spacing="8">
                   <Button x:Name="ResumeGameButton" Content="Resume HotA" Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="ResumeGameClick" IsVisible="False"/>
                   <Button x:Name="StartGameButton" Content="Start HotA" Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="StartGameClick"/>
+                  <TextBlock x:Name="StartRequirements" TextWrapping="Wrap" FontSize="12" Foreground="#F8DCA8" IsVisible="False"/>
                   <Button x:Name="LockButton" Content="Lock ready lobby" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="LockClick"/>
                   <Button x:Name="LeaveButton" Content="Leave game and release my seat" Classes="quiet" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Click="LeaveClick"/>
                 </StackPanel>

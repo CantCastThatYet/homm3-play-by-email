@@ -53,8 +53,14 @@ public class NativeDesktopTests
         {
             await Until(() => windows.All(w => Control<ListBox>(w, "GameList").ItemCount == 1 && Control<Button>(w, "CreateButton").IsEffectivelyEnabled));
             foreach (var window in windows) Control<ListBox>(window, "GameList").SelectedIndex = 0;
+            Assert.False(Control<Button>(windows[0], "StartGameButton").IsEnabled);
+            Assert.True(Control<TextBlock>(windows[0], "StartRequirements").IsVisible);
+            Assert.Contains("Waiting for ready: Red, Blue", Control<TextBlock>(windows[0], "StartRequirements").Text);
+            Assert.Contains("HotA setup not confirmed: Red, Blue", Control<TextBlock>(windows[0], "StartRequirements").Text);
             Click(windows[0], "ReadyButton");
             await Until(() => Control<ItemsControl>(windows[1], "Members").Items.OfType<MemberRow>().Any(m => m.Member.Color == 0 && m.Member.Ready));
+            await Until(() => Control<TextBlock>(windows[0], "StartRequirements").Text?.Contains("Waiting for ready: Blue.", StringComparison.Ordinal) == true);
+            Assert.False(Control<Button>(windows[0], "StartGameButton").IsEnabled);
             Click(windows[1], "ReadyButton");
             await Until(() => windows.All(w => Control<TextBlock>(w, "DetailStatus").Text == "ON THE MAP") || windows.Any(w => Control<TextBlock>(w, "DetailStatus").Text == "START FAILED"));
             foreach (var window in windows) Assert.True(Control<TextBlock>(window, "DetailStatus").Text == "ON THE MAP", Control<TextBlock>(window, "NativeStatus").Text);

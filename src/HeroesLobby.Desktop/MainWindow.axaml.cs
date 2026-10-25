@@ -103,8 +103,7 @@ public partial class MainWindow : Window
             foreach (var game in result.Where(g => g.Members.Any(m => m.PlayerId == current.Player!.Id)))
             {
                 native.Observe(current, game, profile);
-                if (current.NativeStartupAvailable && !string.IsNullOrWhiteSpace(profile.NativeGameRoot) &&
-                    game.HostId == current.Player!.Id && game.Status == "Lobby" && game.Members.Count == 2 && game.Members.All(m => m.Ready && m.NativeReady) &&
+                if (game.HostId == current.Player!.Id && game.Status == "Lobby" && StartBlockers(game).Count == 0 &&
                     launchAttempts.Add($"{game.Id}:{game.Revision}"))
                 {
                     try { await current.BeginNative(game.Id, new(game.Revision, profile.HostAddress)); }
@@ -165,7 +164,10 @@ public partial class MainWindow : Window
         LockButton.IsVisible = game.HostId == client?.Player?.Id;
         LockButton.IsVisible = LockButton.IsVisible && game.Status is "Lobby" or "Prepared" && string.IsNullOrWhiteSpace(profile.NativeGameRoot);
         StartGameButton.IsVisible = game.HostId == client?.Player?.Id && game.Status is "Lobby" or "Prepared";
-        StartGameButton.IsEnabled = !busy && client?.NativeStartupAvailable == true && game.Members.Count == 2 && game.Members.All(m => m.Ready);
+        var blockers = StartBlockers(game);
+        StartGameButton.IsEnabled = !busy && blockers.Count == 0;
+        StartRequirements.IsVisible = StartGameButton.IsVisible && blockers.Count != 0;
+        StartRequirements.Text = string.Join("\n", blockers);
         LockButton.Content = open ? "Lock ready lobby" : "Reopen lobby";
         LockButton.IsEnabled = !busy && (!open || game.Members.Count >= 2 && game.Members.All(m => m.Ready));
         if (me is null) return;
@@ -175,6 +177,24 @@ public partial class MainWindow : Window
             ColorChoice.SelectedIndex = me.Color; FactionChoice.SelectedItem = me.Faction; HeroChoice.Text = me.Hero; BonusChoice.SelectedItem = me.Bonus; settingsKey = key;
         }
         ReadyButton.Content = me.Ready ? "Not ready" : "Mark ready";
+    }
+    private List<string> StartBlockers(GameInfo game)
+    {
+        var reasons = new List<string>();
+        if (client?.NativeStartupAvailable != true) reasons.Add("Update the server to enable HotA startup.");
+        if (string.IsNullOrWhiteSpace(profile.NativeGameRoot)) reasons.Add("Click Set up HotA on this app first.");
+        if (!game.MapName.Equals("Judgement Day", StringComparison.OrdinalIgnoreCase) &&
+            !game.MapName.Equals("Judgement Day.h3m", StringComparison.OrdinalIgnoreCase))
+            reasons.Add($"Map '{game.MapName}' is not supported by this prototype. Create a new game using Judgement Day.");
+        if (game.Members.Count != 2) reasons.Add("Starting a new game requires exactly two players. Solo access is available through Resume HotA after a game has started and saved a checkpoint.");
+        var waiting = game.Members.Where(m => !m.Ready).Select(m => m.DisplayName).ToArray();
+        if (waiting.Length != 0) reasons.Add("Waiting for ready: " + string.Join(", ", waiting) + ".");
+        var setup = game.Members.Where(m => !m.NativeReady).Select(m => m.DisplayName).ToArray();
+        if (setup.Length != 0) reasons.Add("HotA setup not confirmed: " + string.Join(", ", setup) + ". Each player must Set up HotA, then mark ready again.");
+        if (game.Members.Any(m => m.Color != (m.PlayerId == game.HostId ? 0 : 1) ||
+            m.Faction != "Random" || m.Hero != "Random" || m.Bonus != "Random"))
+            reasons.Add("Use Red for the host, Blue for the guest, and Random town, hero and bonus.");
+        return reasons;
     }
     private async Task Run(Func<Task> action)
     {
