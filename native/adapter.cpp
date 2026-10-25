@@ -694,6 +694,9 @@ std::string Command(const std::string& input) {
         return "{\"protocol\":1,\"ok\":true,\"status\":\"armed\",\"durableCheckpointVerified\":false,\"safeLogout\":false,\"resumeSupported\":false}";
     }
     if (command == "experiment_lobby_click") { hp_lobby::RequestClick(); return "{\"protocol\":1,\"ok\":true}"; }
+    if (command == "experiment_lobby_create" || command == "experiment_lobby_join") {
+        hp_lobby::RequestPress(command == "experiment_lobby_create" ? 0 : 1); return "{\"protocol\":1,\"ok\":true}";
+    }
     if (command == "experiment_end_turn") {
         if (!fingerprintAccepted.load() || telemetryState.load() != 2) return hp::Error("not_ready", "The pinned adapter must be active.");
         unsigned world=0; int local=-1; unsigned short date[3]{};
@@ -875,11 +878,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI HeroesPostInitialize(void* mode) {
     if (!captureEvent) return 1;
     // The relay replaces DirectPlay only when the owned copy carries a relay
     // configuration. It must be installed before the engine first creates its
-    // network object, which happens when a multiplayer screen opens.
+    // network object, which happens when a multiplayer screen opens. The game
+    // patch installs it switched off: the in-game lobby turns it on for its games.
     {
         const auto root = hp::Parent(hp::ModulePath(nullptr));
         hp_relay::Config relay; std::string error;
-        if (hp_relay::ReadConfig(root + L"\\HeroesPost.relay.ini", relay, &error)) {
+        if (patchMode.load()) {
+            if (!hp_relay::InstallPassive(root + L"\\HeroesPost.relay.log", &error)) relayError = error;
+        } else if (hp_relay::ReadConfig(root + L"\\HeroesPost.relay.ini", relay, &error)) {
             relay.log_path = root + L"\\HeroesPost.relay.log";
             if (!hp_relay::Install(relay, &error)) relayError = error;
         } else relayError = error;

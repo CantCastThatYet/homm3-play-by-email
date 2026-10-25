@@ -207,11 +207,86 @@ Observed, not explained: on Continue the relay warned that the stand-in's captur
 messages may be traffic the stand-in sent after its capture and before it closed. This has
 not been checked.
 
+## In-game lobby (game patch)
+
+The adapter can also run as a patch inside the player's own HotA installation, with no
+launcher and no desktop app:
+
+- **Loading.** `version.dll` from `artifacts/native/patch-x86` sits in the HotA folder next to
+  `HeroesPost.Native.dll`. Windows loads it instead of the system `version.dll`; it forwards
+  the 17 real exports and loads the adapter in patch mode. Patch mode still checks the
+  supported HotA build, but needs no owned-copy marker, and enables its hooks itself once
+  the main menu is up.
+- **Relay only for Heroes Post games.** The `CoCreateInstance` redirect is installed at
+  start-up but passes every call through to DirectPlay. The lobby switches it on just
+  before it drives HotA's own TCP/IP screens. Choosing a connection type by hand switches
+  it off again, so normal TCP/IP and the HD+ online lobby are unchanged.
+- **Server and identity.** `HeroesPost.ini` in the HotA folder holds `server=http://host:port`.
+  It is created empty on first start. The first time the lobby opens, the game registers
+  the name from HotA's multiplayer screen (`POST /api/players`) and writes `token=` and
+  `token_server=` back to the same file. If the server no longer knows the token, it
+  registers again.
+- **The button.** A Heroes Post button sits below Direct Connection in HotA's multiplayer
+  screen. Its art is put together at run time from the player's own files: the frame of
+  the connection buttons, plain gold from the Cancel button, and the spell scroll
+  artifact. No game art is stored in this repository.
+- **The window** (`native/lobby_ui.cpp`). It uses HD+'s blue background and gold border,
+  its sunken panels, gold bars and 16-pixel icons, and HotA's fonts. It shows:
+  - the connection line;
+  - **Your games**, the relay seats held by this account: setting up, you are in, away
+    with the seat kept, or the server playing your turn;
+  - **Games on this server**: name, host and seats, a lock icon for passwords, "playing"
+    once started;
+  - lobby chat;
+  - a hint bar;
+  - the buttons **Create**, **Join**, **Continue**, **Turn limit** and **Close**.
+
+  A worker thread (`native/lobby_client.cpp`, WinHTTP) polls `GET /api/relay/lobby?after=<chat id>`
+  every 2 seconds while the window is open. It posts a mouse move to the game window when
+  anything changes, and the window repaints only then.
+- **Create** turns the relay on, then sends HotA's multiplayer dialog the clicks it would
+  get from the player: TCP/IP, then Host. HotA's own session-name dialog and scenario setup
+  follow. The "Your IP Address" caption is replaced with the server address.
+- **Join** turns the relay on with a filter, so session enumeration reports only the
+  chosen game. It clicks TCP/IP, waits up to 10 seconds for the session to be listed,
+  then clicks its row and Join. Double-clicking a game does the same.
+- **Turn limit** cycles through 2 min, 5 min, 10 min, 30 min, 1 h, 4 h and 1 day for the
+  selected game (`PUT /api/relay/games/{id}/turn-limit`).
+- **Chat**: `POST /api/relay/chat`. The server keeps the newest 200 lines in memory; a
+  newly opened window gets the last 30.
+- Text conversion: HotA text is in the ANSI code page and is sent as UTF-8. Relay session
+  and seat names are raw bytes, which the server keeps as Latin-1 and splits at HotA's
+  `0xFA` separator into game and host.
+- HotA reports mouse buttons to dialogs as message `0x30A`, with the Windows message
+  (`0x201` down, `0x202` up) in the subtype and the position in game coordinates.
+
+### Verification, 2026-10-25
+
+Two patched copies on one machine against a local server, driven with real mouse clicks.
+The test moves the cursor over HotA's window and posts the button messages; HD reads the
+position from the cursor, which is why posted clicks failed before.
+
+1. Red opened the lobby from the multiplayer screen's new button. It signed in by itself
+   as the name typed in HotA. A chat line typed in the lobby reached the server and showed
+   in both lobbies.
+2. Red pressed **Create**. HotA showed its session-name dialog over the TCP/IP screen.
+   After OK, the relay log had `Open create My Game<FA>SigmaGoidaSkibid`, and the server
+   listed the game as open with 1 of 8 seats.
+3. Blue's lobby listed the game. Blue selected it and pressed **Join**, and landed in
+   HotA's scenario setup next to Red (`Open join`, `CreatePlayer BluePlayer`).
+4. Red pressed Begin; both accepted HotA's PvP options and reached the adventure map.
+   Blue's HotA was then killed. On restart, Blue's lobby showed the game under **Your games**
+   as away with the seat kept, and **Turn limit** changed it on the server from 600 to
+   1800 seconds.
+
 ### Not yet done
 
-- **Hosting and joining by hand in HotA's TCP/IP screens is not yet verified.** Test
-  scripts can only drive the scripted start path, because HotA ignores posted mouse input.
-  The relay's session list and join path are the ones the scripted start uses.
+- **Continue from the in-game lobby.** The button is there but disabled. Returning to an
+  away seat still needs the desktop app or `NativeHost continue`. The patch would have to
+  claim the seat, download the capture and restart HotA into the resumed seat.
+- Seat saving still runs in the desktop app's seat keeper; the patch does not upload
+  captures yet. Without the app, a stand-in starts from the last capture the server has.
+- Stand-in HotA windows are still visible on the server's desktop.
 - The relay keeps sessions, seats and delivery logs only in memory. Restarting the server
   ends every running game. Captures survive on disk, but nothing can rejoin them.
 - A player who quits mid-turn loses actions taken since the last capture, at most about

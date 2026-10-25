@@ -55,7 +55,8 @@ public sealed class RelaySession
 public sealed record RelayAccount(string Id, string Name, bool StandIn = false);
 
 public sealed record RelaySeatView(uint Id, string Name, string? Account, bool Away, bool StandIn, DateTimeOffset? AwaySince, int Delivered, int Sent);
-public sealed record RelayGameView(Guid Instance, string Name, bool Started, int? TurnSeconds, int LiveClients, IReadOnlyList<RelaySeatView> Seats);
+public sealed record RelayGameView(Guid Instance, string Name, bool Started, int? TurnSeconds, int LiveClients, IReadOnlyList<RelaySeatView> Seats,
+    uint MaxPlayers = 0, bool Password = false);
 
 public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
 {
@@ -77,7 +78,8 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
         lock (gate)
             return sessions.Select(s => new RelayGameView(s.Info.Instance, s.Info.Name, s.Started, s.TurnSeconds, s.Peers.Count,
                 s.Entities.Values.Where(e => !e.Group).Select(e => new RelaySeatView(e.Id, e.Short, e.Account, e.Owner is AwaySeat,
-                    accounts.GetValueOrDefault(e.Owner)?.StandIn == true, e.AwaySince, e.Delivered.Count, e.Sent)).ToList())).ToList();
+                    accounts.GetValueOrDefault(e.Owner)?.StandIn == true, e.AwaySince, e.Delivered.Count, e.Sent)).ToList(),
+                s.Info.MaxPlayers, s.Info.Password.Length > 0)).ToList();
     }
 
     public bool SetTurnSeconds(Guid instance, int? seconds)

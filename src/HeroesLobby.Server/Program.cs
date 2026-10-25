@@ -13,6 +13,7 @@ builder.Services.AddSingleton<RelayHub>();
 builder.Services.AddSingleton<RelayServer>();
 builder.Services.AddHostedService(services => services.GetRequiredService<RelayServer>());
 builder.Services.AddSingleton<RelayCaptures>();
+builder.Services.AddSingleton<RelayChat>();
 builder.Services.AddSingleton<StandInManager>();
 builder.Services.AddHostedService(services => services.GetRequiredService<StandInManager>());
 builder.Services.AddSignalR(options => options.MaximumReceiveMessageSize = 4096);
@@ -76,6 +77,7 @@ app.MapPut("/api/games/{id}/native", async (string id, NativeLaunchReport reques
 app.MapCheckpointEndpoints();
 app.MapNativeBranchEndpoints();
 app.MapRelayEndpoints();
+app.MapRelayLobbyEndpoints();
 app.Run();
 
 static PlayerInfo Identity(HttpContext context, LobbyStore store) => store.Authenticate(context.Request.Headers.Authorization.ToString());

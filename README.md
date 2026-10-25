@@ -14,6 +14,8 @@ dotnet run --project src/HeroesLobby.Server -- --urls http://0.0.0.0:5080
 
 Each player opens the desktop app, enters the server address and a name, connects, and clicks **Set up HotA** once. **Play HotA** opens HotA connected to the server. In HotA choose New Game, Multiplayer, TCP/IP, then Host or Join, and turn on simultaneous turns in the game options. Keep the app open while playing: it saves your position on the server. After you leave, your game appears under **Your games** with **Continue**; the turn limit for away seats is chosen there too.
 
+**In-game lobby (no app).** Copy `version.dll` and `HeroesPost.Native.dll` from `artifacts/native/patch-x86` into the HotA folder and put `server=http://host:5080` in `HeroesPost.ini` there. HotA's multiplayer screen then has a Heroes Post button. It opens a lobby with your games, the server's games, chat, Create and Join; see [In-game lobby](docs/relay-transport.md#in-game-lobby-game-patch). Continue and seat saving still need the app.
+
 The relay listens on TCP port 5090 (`Relay:Port`) next to the HTTP port. Players' copies connect to the server's host name on that port. Only the supported HotA build is accepted; see `NativeBridge.Fingerprints`. Hosting by hand in HotA's menus has not been verified yet, and other limits are listed in the relay document.
 
 The Windows native package is `artifacts/HeroesPost-win-x64.zip` when built locally. Extract the whole folder and run `HeroesLobby.Desktop.exe`; no .NET installation is required. Keep the DLLs beside the executable.

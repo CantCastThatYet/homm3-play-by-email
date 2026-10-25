@@ -29,3 +29,10 @@ public sealed record RelayGameInfo(Guid Id, string Name, bool Started, string Se
 /// <summary>A seat handed back to its player: resume the latest capture and rejoin as this seat.</summary>
 public sealed record RelayClaim(Guid Id, string Session, string Seat, int Color, string Kind, string MapFile);
 public sealed record RelayTurnLimit(int TurnSeconds);
+/// <summary>A relay game anyone on the server can see. Name and Host are HotA's session name halves (Latin-1 bytes).</summary>
+public sealed record RelayOpenGame(Guid Id, string Name, string Host, bool Started, int Players, int MaxPlayers, bool Password);
+public sealed record RelayChatLine(long Id, string Name, string Text, DateTimeOffset At);
+public sealed record RelayChatPost(string Text);
+/// <summary>Everything the in-game lobby shows, in one poll. Chat holds the lines after the requested id.</summary>
+public sealed record RelayLobby(string Player, int RelayPort, bool StandIns, int DefaultTurnSeconds,
+    List<RelayGameInfo> Mine, List<RelayOpenGame> Games, List<RelayChatLine> Chat);

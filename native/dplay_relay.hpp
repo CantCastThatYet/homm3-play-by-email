@@ -22,16 +22,24 @@ struct Config {
     // Game messages the captured engine had received but HD's simultaneous-turn queue still held
     // (deferred= file of u32 length + message). Re-delivered once, first, when game messages are released.
     std::vector<std::vector<std::uint8_t>> rejoin_deferred;
+    // When set (GUID text), session enumeration reports only this game: the in-game lobby's Join.
+    std::string only_instance;
     std::wstring log_path;     // empty disables logging
 };
 
-// Reads key=value lines (host, port, ticket, name, rejoin, seat, from, sent, deferred). Missing file is not an error:
+// Reads key=value lines (host, port, ticket, name, rejoin, seat, from, sent, deferred, only). Missing file is not an error:
 // returns false with an empty error so callers keep stock DirectPlay.
 bool ReadConfig(const std::wstring& path, Config& config, std::string* error);
 
 // Redirects the main module's CoCreateInstance import for CLSID_DirectPlay and
 // CLSID_DirectPlayLobby. Other classes are passed through unchanged.
 bool Install(const Config& config, std::string* error);
+// The game patch: redirect CoCreateInstance now, but pass every call through to DirectPlay
+// until Activate. A DirectPlay object the engine already holds keeps its transport.
+bool InstallPassive(const std::wstring& log_path, std::string* error);
+void Activate(const Config& config);
+void Deactivate();
+// True while new DirectPlay objects go through the relay.
 bool Installed() noexcept;
 // True when this client resumes a held seat in a running game (rejoin= and seat=).
 bool Rejoining() noexcept;

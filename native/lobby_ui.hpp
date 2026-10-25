@@ -7,4 +7,6 @@ namespace hp_lobby {
 bool Install(std::string* error);
 // Development: the multiplayer dialog acts as if its Heroes Post button was clicked on its next message.
 void RequestClick() noexcept;
+// Development: the open lobby window acts as if button `button` was pressed (0 Create, 1 Join the selected or first game).
+void RequestPress(int button) noexcept;
 }

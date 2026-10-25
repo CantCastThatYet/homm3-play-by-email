@@ -215,8 +215,13 @@ std::map<std::uint32_t, std::string> rejoinNames; // guarded by statusMutex
 std::mutex statusMutex;
 std::string statusSession, statusError, statusInstance;
 std::uint32_t statusSeat = 0; // local player id in the open session
-Config installedConfig;
+Config installedConfig; // guarded by configMutex once installed
+std::mutex configMutex;
 std::atomic<bool> installed{false};
+// The game patch installs the hook at startup but leaves DirectPlay alone until a Heroes Post game is entered.
+std::atomic<bool> active{false};
+Config CurrentConfig() { std::lock_guard<std::mutex> lock(configMutex); return installedConfig; }
+bool SameInstance(const GUID& g, const std::string& text) { return _stricmp(GuidText(g).c_str(), text.c_str()) == 0; }
 
 // ------------------------------------------------------------- DirectPlay
 class DirectPlay {
@@ -296,6 +301,7 @@ public:
         for (std::uint32_t i = 0; i < count && r.ok && i < 1024; ++i) found.push_back(ReadSession(r));
         if (!r.ok) return DPERR_GENERIC;
         for (auto& s : found) {
+            if (!config.only_instance.empty() && !SameInstance(s.instance, config.only_instance)) continue;
             Image image; image.Reserve(sizeof(DPSESSIONDESC2)); image.Session(0, s);
             // Report password protection without disclosing anything.
             std::vector<std::uint8_t> buffer(image.bytes.size()); DWORD size = static_cast<DWORD>(buffer.size());
@@ -865,10 +871,11 @@ private:
 typedef HRESULT(WINAPI* CoCreateInstanceFn)(REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID*);
 CoCreateInstanceFn originalCoCreateInstance = nullptr;
 HRESULT WINAPI CoCreateInstanceHook(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID* out) {
+    if (!active.load()) return originalCoCreateInstance(clsid, outer, context, iid, out);
     if (IsEqualGUID(clsid, CLSID_DirectPlay)) {
         Log("CoCreateInstance(CLSID_DirectPlay)");
         if (!out) return E_POINTER;
-        void* object = nullptr; const HRESULT hr = CreateDirectPlay(installedConfig, &object);
+        void* object = nullptr; const HRESULT hr = CreateDirectPlay(CurrentConfig(), &object);
         if (FAILED(hr)) return hr;
         auto* dp = static_cast<DirectPlay*>(object); const HRESULT q = dp->QueryInterface(iid, out); dp->Release(); return q;
     }
@@ -932,6 +939,7 @@ bool ReadConfig(const std::wstring& path, Config& config, std::string* error) {
         else if (key == "rejoin") c.rejoin_session = value;
         else if (key == "seat") c.rejoin_seat = value;
         else if (key == "from") { try { c.rejoin_from = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
+        else if (key == "only") c.only_instance = value;
         else if (key == "sent") { try { c.rejoin_sent = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
         else if (key == "deferred" && !ReadDeferred(hp::Parent(path) + L"\\" + std::wstring(value.begin(), value.end()), c.rejoin_deferred)) {
             if (error) *error = "relay_deferred_file_invalid"; return false;
@@ -965,10 +973,9 @@ HRESULT CreateLobby(void** out) {
     try { *out = new Lobby(); return S_OK; } catch (...) { *out = nullptr; return E_OUTOFMEMORY; }
 }
 
-bool Install(const Config& config, std::string* error) {
+bool InstallPassive(const std::wstring& log_path, std::string* error) {
     if (installed.load()) return true;
-    installedConfig = config; logPath = config.log_path;
-    holdGameMessages = !config.rejoin_seat.empty();
+    if (!log_path.empty()) logPath = log_path;
     void* original = nullptr;
     if (!PatchImport(GetModuleHandleW(nullptr), "ole32.dll", "CoCreateInstance", reinterpret_cast<void*>(CoCreateInstanceHook), &original) || !original) {
         if (error) *error = "cocreateinstance_import_not_found";
@@ -976,10 +983,25 @@ bool Install(const Config& config, std::string* error) {
     }
     originalCoCreateInstance = reinterpret_cast<CoCreateInstanceFn>(original);
     installed.store(true);
-    Log("Relay installed for " + config.host + ":" + std::to_string(config.port));
     return true;
 }
-bool Installed() noexcept { return installed.load(); }
+void Activate(const Config& config) {
+    { std::lock_guard<std::mutex> lock(configMutex); installedConfig = config; }
+    holdGameMessages = !config.rejoin_seat.empty();
+    active.store(true);
+    Log("Relay active for " + config.host + ":" + std::to_string(config.port) + (config.only_instance.empty() ? "" : " showing only " + config.only_instance));
+}
+void Deactivate() {
+    if (!active.exchange(false)) return;
+    Log("Relay inactive; DirectPlay is HotA's own again");
+}
+bool Install(const Config& config, std::string* error) {
+    if (installed.load()) return true;
+    if (!InstallPassive(config.log_path, error)) return false;
+    Activate(config);
+    return true;
+}
+bool Installed() noexcept { return active.load(); }
 std::uint32_t ConsumedCount() noexcept { return statConsumed.load(); }
 std::uint32_t SentCount() noexcept { return statSent.load(); }
 void ReleaseGameMessages() noexcept { holdGameMessages = false; }
@@ -989,17 +1011,23 @@ bool RejoinPlayerName(std::uint32_t id, std::string& name) {
     name = it->second; return true;
 }
 
-bool Rejoining() noexcept { return installed.load() && !installedConfig.rejoin_seat.empty(); }
-std::uint32_t RejoinDeferredCount() noexcept { return Rejoining() ? static_cast<std::uint32_t>(installedConfig.rejoin_deferred.size()) : 0; }
+bool Rejoining() noexcept {
+    if (!active.load()) return false;
+    std::lock_guard<std::mutex> lock(configMutex); return !installedConfig.rejoin_seat.empty();
+}
+std::uint32_t RejoinDeferredCount() noexcept {
+    if (!active.load()) return 0;
+    std::lock_guard<std::mutex> lock(configMutex); return static_cast<std::uint32_t>(installedConfig.rejoin_deferred.size());
+}
 
 std::string StatusJson() {
-    std::ostringstream o; std::string session, error, instance; std::uint32_t seat = 0;
+    std::ostringstream o; std::string session, error, instance; std::uint32_t seat = 0; const Config config = CurrentConfig();
     { std::lock_guard<std::mutex> lock(statusMutex); session = statusSession; error = statusError; instance = statusInstance; seat = statusSeat; }
-    o << "{\"installed\":" << (installed.load() ? "true" : "false")
-      << ",\"host\":" << hp::Json(installedConfig.host) << ",\"port\":" << installedConfig.port
+    o << "{\"installed\":" << (installed.load() ? "true" : "false") << ",\"active\":" << (active.load() ? "true" : "false")
+      << ",\"host\":" << hp::Json(config.host) << ",\"port\":" << config.port
       << ",\"objects\":" << statObjects.load() << ",\"connected\":" << (statConnected.load() ? "true" : "false")
       << ",\"sessionOpen\":" << (statOpen.load() ? "true" : "false") << ",\"session\":" << hp::Json(session) << ",\"instance\":" << hp::Json(instance) << ",\"seat\":" << seat
-      << ",\"rejoinSeat\":" << hp::Json(installedConfig.rejoin_seat) << ",\"consumed\":" << statConsumed.load()
+      << ",\"rejoinSeat\":" << hp::Json(config.rejoin_seat) << ",\"consumed\":" << statConsumed.load()
       << ",\"sent\":" << statSent.load() << ",\"delivered\":" << statDelivered.load() << ",\"system\":" << statSystem.load()
       << ",\"error\":" << hp::Json(error) << '}';
     return o.str();

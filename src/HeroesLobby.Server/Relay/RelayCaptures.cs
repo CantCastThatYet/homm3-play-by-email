@@ -69,6 +69,17 @@ public sealed class RelayCaptures(IConfiguration config, ILogger<RelayCaptures> 
 
 public static class RelayEndpoints
 {
+    /// <summary>The relay games in which the player holds a seat.</summary>
+    public static List<RelayGameInfo> MyGames(PlayerInfo player, RelayHub hub, RelayCaptures captures, StandInManager standIns) =>
+        hub.Games().SelectMany(g => g.Seats.Where(s => s.Account == player.Id).Select(s =>
+        {
+            var capture = captures.Latest(g.Instance, s.Id);
+            var state = !g.Started ? "Lobby" : !s.Away ? (s.StandIn ? "StandIn" : "Playing") : "Away";
+            return new RelayGameInfo(g.Instance, g.Name, g.Started, s.Name, s.Id, state, g.TurnSeconds ?? standIns.DefaultTurnSeconds,
+                g.LiveClients, capture?.Kind, capture is null ? null : $"{capture.Month}/{capture.Week}/{capture.Day}",
+                g.Seats.Select(x => x.Name).ToArray());
+        })).ToList();
+
     public static void MapRelayEndpoints(this WebApplication app)
     {
         static PlayerInfo Who(HttpContext context, LobbyStore lobby) => lobby.Authenticate(context.Request.Headers.Authorization.ToString());
@@ -83,17 +94,7 @@ public static class RelayEndpoints
             new RelayServerInfo(relay.Port, standIns.Enabled, standIns.DefaultTurnSeconds));
 
         app.MapGet("/api/relay/games", (HttpContext context, LobbyStore lobby, RelayHub hub, RelayCaptures captures, StandInManager standIns) =>
-        {
-            var player = Who(context, lobby);
-            return hub.Games().SelectMany(g => g.Seats.Where(s => s.Account == player.Id).Select(s =>
-            {
-                var capture = captures.Latest(g.Instance, s.Id);
-                var state = !g.Started ? "Lobby" : !s.Away ? (s.StandIn ? "StandIn" : "Playing") : "Away";
-                return new RelayGameInfo(g.Instance, g.Name, g.Started, s.Name, s.Id, state, g.TurnSeconds ?? standIns.DefaultTurnSeconds,
-                    g.LiveClients, capture?.Kind, capture is null ? null : $"{capture.Month}/{capture.Week}/{capture.Day}",
-                    g.Seats.Select(x => x.Name).ToArray());
-            })).ToList();
-        });
+            MyGames(Who(context, lobby), hub, captures, standIns));
 
         app.MapPost("/api/relay/games/{id:guid}/captures", async (Guid id, HttpContext context, LobbyStore lobby, RelayHub hub, RelayCaptures captures) =>
         {
