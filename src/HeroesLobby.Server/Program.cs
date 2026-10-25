@@ -1,6 +1,7 @@
 using System.Threading.RateLimiting;
 using HeroesLobby.Contracts;
 using HeroesLobby.Server;
+using HeroesLobby.Server.Relay;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 
@@ -8,6 +9,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 16 * 1024);
 builder.Services.AddSingleton<LobbyStore>();
 builder.Services.AddSingleton<CheckpointStore>();
+builder.Services.AddSingleton<RelayHub>();
+builder.Services.AddSingleton<RelayServer>();
+builder.Services.AddHostedService(services => services.GetRequiredService<RelayServer>());
 builder.Services.AddSignalR(options => options.MaximumReceiveMessageSize = 4096);
 builder.Services.AddRateLimiter(options =>
 {

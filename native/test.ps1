@@ -36,6 +36,8 @@ cl /nologo /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x06
 if errorlevel 1 exit /b 1
 cl /nologo /MP4 /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0601 /I"$nativeRoot" "$nativeRoot\resume_session_test.cpp" "$nativeRoot\world_resume.cpp" "$nativeRoot\memfile_import.cpp" "$nativeRoot\common.cpp" /Fe:Native.ResumeSessionTest.exe /link /DYNAMICBASE /NXCOMPAT
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0601 /I"$nativeRoot" "$nativeRoot\dplay_relay_test.cpp" "$nativeRoot\dplay_relay.cpp" "$nativeRoot\common.cpp" /Fe:Native.RelayTest.exe /link /DYNAMICBASE /NXCOMPAT
+if errorlevel 1 exit /b 1
 exit /b 0
 "@
 [System.IO.File]::WriteAllText($testBuild, $script, [System.Text.Encoding]::ASCII)

@@ -20,7 +20,7 @@ public sealed class CheckpointFactory(string? database = null, long maxBytes = 6
         config.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Lobby:Database"] = Database,
-            ["Checkpoints:MaxBytes"] = maxBytes.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            ["Relay:Port"] = "0", ["Checkpoints:MaxBytes"] = maxBytes.ToString(System.Globalization.CultureInfo.InvariantCulture)
         }));
 }
 

@@ -16,7 +16,7 @@ public sealed class LobbyFactory(string? database = null) : WebApplicationFactor
 {
     public string Database { get; } = database ?? Path.Combine(Path.GetTempPath(), "heroes-post-tests", Guid.NewGuid().ToString("N"), "lobby.db");
     protected override void ConfigureWebHost(IWebHostBuilder builder) => builder.ConfigureAppConfiguration((_, config) =>
-        config.AddInMemoryCollection(new Dictionary<string, string?> { ["Lobby:Database"] = Database, ["Lobby:Name"] = "Test server" }));
+        config.AddInMemoryCollection(new Dictionary<string, string?> { ["Lobby:Database"] = Database, ["Lobby:Name"] = "Test server", ["Relay:Port"] = "0" }));
 }
 
 public class LobbyTests

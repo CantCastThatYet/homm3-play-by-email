@@ -12,6 +12,6 @@ ENV URLS=http://0.0.0.0:8080
 ENV Lobby__Database=/data/lobby.db
 RUN mkdir /data && chown app:app /data
 USER app
-EXPOSE 8080
+EXPOSE 8080 5090
 VOLUME /data
 ENTRYPOINT ["dotnet", "HeroesLobby.Server.dll"]

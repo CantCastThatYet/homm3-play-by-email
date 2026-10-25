@@ -3,6 +3,7 @@ services:
     build: .
     ports:
       - "5080:8080"
+      - "5090:5090"
     environment:
       Lobby__Name: "My Heroes community"
     volumes:

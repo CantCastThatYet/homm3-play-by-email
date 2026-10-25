@@ -13,6 +13,7 @@
 #include "world_resume.hpp"
 #include "resume_session.hpp"
 #include "solo_transport.hpp"
+#include "dplay_relay.hpp"
 #include "vendor/patcher_x86.hpp"
 #include <psapi.h>
 #include <sddl.h>
@@ -53,6 +54,7 @@ std::mutex stateMutex, captureMutex;
 std::string fingerprintJson = "[]", fingerprintReason = "not_ready", hookError;
 std::string captureStatus = "idle", captureError, lastCaptureManifest;
 std::string lastSaveName;
+std::string relayError;
 std::string preparedMap;
 unsigned completedWorld=0, completedToken=0;
 int completedLocal=-1;
@@ -491,6 +493,7 @@ std::string Probe() {
     std::ostringstream o;
     o << "{\"protocol\":1,\"ok\":true,\"pid\":" << GetCurrentProcessId()
       << ",\"createdFiletime\":" << hp::Json(std::to_string(hp::CreationTime(GetCurrentProcess())))
+      << ",\"relay\":" << hp_relay::StatusJson() << ",\"relayError\":" << hp::Json(relayError)
       << ",\"fingerprintAccepted\":" << (supported ? "true" : "false")
       << ",\"fingerprintReason\":" << hp::Json(fingerprintReason) << ",\"modules\":" << fingerprintJson
       << ",\"telemetry\":{\"status\":" << hp::Json(status) << ",\"error\":" << hp::Json(hookError)
@@ -808,6 +811,17 @@ extern "C" __declspec(dllexport) DWORD WINAPI HeroesPostInitialize(void*) {
         + L"-" + std::to_wstring(hp::CreationTime(GetCurrentProcess()));
     captureEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!captureEvent) return 1;
+    // The relay replaces DirectPlay only when the owned copy carries a relay
+    // configuration. It must be installed before the engine first creates its
+    // network object, which happens when a multiplayer screen opens.
+    {
+        const auto root = hp::Parent(hp::ModulePath(nullptr));
+        hp_relay::Config relay; std::string error;
+        if (hp_relay::ReadConfig(root + L"\\HeroesPost.relay.ini", relay, &error)) {
+            relay.log_path = root + L"\\HeroesPost.relay.log";
+            if (!hp_relay::Install(relay, &error)) relayError = error;
+        } else relayError = error;
+    }
     hp::Handle writer(CreateThread(nullptr, 0, CaptureWriter, nullptr, 0, nullptr));
     hp::Handle server(CreateThread(nullptr, 0, PipeServer, nullptr, 0, nullptr));
     return writer && server ? 0 : 2;
