@@ -52,6 +52,7 @@ public sealed class FrameReader(byte[] frame, int offset)
     private int position = offset;
     public bool Ok { get; private set; } = true;
     public int Position => position;
+    public int Remaining => Ok ? frame.Length - position : 0;
     private bool Need(int count) { if (!Ok || frame.Length - position < count) Ok = false; return Ok; }
     public uint U32() { if (!Need(4)) return 0; var v = BinaryPrimitives.ReadUInt32LittleEndian(frame.AsSpan(position)); position += 4; return v; }
     public Guid Guid() { if (!Need(16)) return System.Guid.Empty; var v = new Guid(frame.AsSpan(position, 16)); position += 16; return v; }

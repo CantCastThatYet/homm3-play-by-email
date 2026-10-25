@@ -23,6 +23,11 @@ public sealed class RelayEntity
     public List<uint> Subgroups { get; } = [];
     /// <summary>Game messages delivered to this player since it joined, in order. A resumed client replays from its captured count.</summary>
     public List<byte[]> Delivered { get; } = [];
+    /// <summary>Game messages this player has sent. A capture that sent fewer is missing later actions.</summary>
+    public int Sent { get; set; }
+    /// <summary>Lobby player who created this seat; null for clients without a ticket.</summary>
+    public string? Account { get; set; }
+    public DateTimeOffset? AwaySince { get; set; }
     public const int DeliveredLimit = 200_000;
 }
 
@@ -35,6 +40,8 @@ public sealed class RelaySession
     /// <summary>Set once the host transmits the started world; from then on departures hold their seats.</summary>
     public bool Started { get; set; }
     public RelayJournal? Journal { get; set; }
+    /// <summary>How long a stand-in waits for an away seat's player before ending that seat's turn; null uses the server default.</summary>
+    public int? TurnSeconds { get; set; }
     public uint PlayerCount => (uint)Entities.Values.Count(e => !e.Group);
     public RelaySessionInfo Current => Info with { CurrentPlayers = PlayerCount };
 }
@@ -44,8 +51,17 @@ public sealed class RelaySession
 /// relay's change notifications into the DirectPlay system messages the engine expects.
 /// All state is guarded by one lock; frames are only queued while holding it.
 /// </summary>
+/// <summary>Who a relay client is, from its Hello ticket. Stand-ins are the server's own HotA clients.</summary>
+public sealed record RelayAccount(string Id, string Name, bool StandIn = false);
+
+public sealed record RelaySeatView(uint Id, string Name, string? Account, bool Away, bool StandIn, DateTimeOffset? AwaySince, int Delivered, int Sent);
+public sealed record RelayGameView(Guid Instance, string Name, bool Started, int? TurnSeconds, int LiveClients, IReadOnlyList<RelaySeatView> Seats);
+
 public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
 {
+    /// <summary>Resolves a Hello ticket; null for an unknown or missing ticket.</summary>
+    public Func<string, RelayAccount?> Authenticate { get; set; } = _ => null;
+    private readonly Dictionary<IRelayPeer, RelayAccount> accounts = [];
     private readonly string? journalDirectory = config["Relay:JournalDirectory"];
     private readonly object gate = new();
     private readonly List<RelaySession> sessions = [];
@@ -54,7 +70,25 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
 
     public IReadOnlyList<RelaySessionInfo> Sessions() { lock (gate) return sessions.Select(s => s.Current).ToList(); }
 
-    public void Disconnected(IRelayPeer peer) { lock (gate) Leave(peer); }
+    public void Disconnected(IRelayPeer peer) { lock (gate) { Leave(peer); accounts.Remove(peer); } }
+
+    public IReadOnlyList<RelayGameView> Games()
+    {
+        lock (gate)
+            return sessions.Select(s => new RelayGameView(s.Info.Instance, s.Info.Name, s.Started, s.TurnSeconds, s.Peers.Count,
+                s.Entities.Values.Where(e => !e.Group).Select(e => new RelaySeatView(e.Id, e.Short, e.Account, e.Owner is AwaySeat,
+                    accounts.GetValueOrDefault(e.Owner)?.StandIn == true, e.AwaySince, e.Delivered.Count, e.Sent)).ToList())).ToList();
+    }
+
+    public bool SetTurnSeconds(Guid instance, int? seconds)
+    {
+        lock (gate)
+        {
+            var session = sessions.FirstOrDefault(s => s.Info.Instance == instance);
+            if (session is null) return false;
+            session.TurnSeconds = seconds; return true;
+        }
+    }
 
     public void Handle(IRelayPeer peer, byte[] frame)
     {
@@ -65,8 +99,11 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
             switch (type)
             {
                 case RelayProtocol.Hello:
-                    var version = r.U32(); r.Str(); var name = r.Str();
-                    logger.LogInformation("Relay client {Peer} connected as {Name}, protocol {Version}", peer.Label, name, version);
+                    var version = r.U32(); var ticket = r.Str(); var name = r.Str();
+                    var account = ticket.Length == 0 ? null : Authenticate(ticket);
+                    if (account is not null) accounts[peer] = account;
+                    else if (ticket.Length != 0) logger.LogWarning("Relay client {Peer} presented an unknown ticket", peer.Label);
+                    logger.LogInformation("Relay client {Peer} connected as {Name} ({Account}), protocol {Version}", peer.Label, name, account?.Name ?? "no account", version);
                     return;
                 case RelayProtocol.Enum: EnumSessions(peer, r); return;
                 case RelayProtocol.Open: Open(peer, r); return;
@@ -164,12 +201,18 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
     {
         var request = r.U32(); var name = r.Str(); var seat = r.Str(); var from = r.U32();
         if (!r.Ok || name.Length == 0 || seat.Length == 0) { Reply(peer, request, RelayProtocol.ErrInvalidParams); return; }
+        int? sent = r.Remaining >= 4 ? (int)r.U32() : null;
         if (membership.ContainsKey(peer)) { Reply(peer, request, RelayProtocol.ErrAccessDenied); return; }
         var held = sessions.Where(s => s.Started && s.Info.Name.StartsWith(name, StringComparison.Ordinal))
             .SelectMany(s => s.Entities.Values.Where(e => !e.Group && e.Owner is AwaySeat && string.Equals(e.Short, seat, StringComparison.OrdinalIgnoreCase)).Select(e => (s, e)))
             .ToList();
         if (held.Count != 1) { logger.LogWarning("Relay client {Peer} cannot rejoin {Name} as {Seat}: {Count} held seats match", peer.Label, name, seat, held.Count); Reply(peer, request, RelayProtocol.ErrNoSessions); return; }
         var (session, entity) = held[0];
+        var account = accounts.GetValueOrDefault(peer);
+        if (entity.Account is not null && account?.StandIn != true && account?.Id != entity.Account)
+        { logger.LogWarning("Relay client {Peer} ({Account}) may not take seat {Seat}", peer.Label, account?.Name ?? "no account", seat); Reply(peer, request, RelayProtocol.ErrAccessDenied); return; }
+        if (sent < entity.Sent)
+            logger.LogWarning("Relay client {Peer} resumes seat {Seat} from a capture that had sent {Sent} of the seat's {Total} messages; its later actions are lost", peer.Label, seat, sent, entity.Sent);
         if (from > entity.Delivered.Count) { logger.LogWarning("Relay client {Peer} resumes seat {Seat} at message {From} but only {Count} were delivered", peer.Label, seat, from, entity.Delivered.Count); Reply(peer, request, RelayProtocol.ErrInvalidParams); return; }
         session.Peers.Add(peer); membership[peer] = session; claims[peer] = (entity, (int)from);
         logger.LogInformation("Relay client {Peer} rejoins {Session} for seat {Id:x8} '{Seat}'", peer.Label, session.Info.Name, entity.Id, entity.Short);
@@ -200,7 +243,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
             var seat = claim.Seat;
             if (seat.Owner is not AwaySeat || !session.Entities.ContainsKey(seat.Id)) { Reply(peer, request, RelayProtocol.ErrCantCreatePlayer); return; }
             if (session.Host == seat.Owner) session.Host = peer;
-            seat.Owner = peer;
+            seat.Owner = peer; seat.AwaySince = null;
             Reply(peer, request, RelayProtocol.Ok, w => w.U32(seat.Id));
             logger.LogInformation("Relay seat {Id:x8} '{Name}' in {Session} reclaimed by {Peer}; replaying messages {From}..{Count}", seat.Id, seat.Short, session.Info.Name, peer.Label, claim.From, seat.Delivered.Count);
             foreach (var frame in seat.Delivered.Skip(claim.From)) peer.Post(frame);
@@ -217,7 +260,8 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
             if (!group && session.Info.MaxPlayers != 0 && session.PlayerCount >= session.Info.MaxPlayers) { Reply(peer, request, RelayProtocol.ErrCantCreatePlayer); return; }
             id = NewId(session);
         }
-        var entity = new RelayEntity { Id = id, Group = group, Owner = peer, Flags = flags, Parent = parent, Short = shortName, Long = longName, Data = data };
+        var entity = new RelayEntity { Id = id, Group = group, Owner = peer, Flags = flags, Parent = parent, Short = shortName, Long = longName, Data = data,
+            Account = group || accounts.GetValueOrDefault(peer) is not { StandIn: false } owner ? null : owner.Id };
         session.Entities[id] = entity;
         if (parent != 0) session.Entities[parent].Subgroups.Add(id);
         Reply(peer, request, RelayProtocol.Ok, w => w.U32(id));
@@ -260,6 +304,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
     {
         var from = r.U32(); var to = r.U32(); r.U32(); var data = r.Blob();
         if (!r.Ok || !Member(peer, out var session) || !session.Entities.TryGetValue(from, out var sender) || sender.Owner != peer) return;
+        sender.Sent++;
         var message = GameMessage.Parse(data);
         if (!session.Started && message.Id == GameMessage.LoadGame)
         {
@@ -377,7 +422,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
     private void Hold(RelaySession session, IRelayPeer peer, RelayEntity player)
     {
         if (player.Owner is AwaySeat) return;
-        player.Owner = new AwaySeat($"away:{player.Short}");
+        player.Owner = new AwaySeat($"away:{player.Short}"); player.AwaySince = DateTimeOffset.UtcNow;
         logger.LogInformation("Relay seat {Id:x8} '{Name}' in {Session} is away (was {Peer})", player.Id, player.Short, session.Info.Name, peer.Label);
     }
 }

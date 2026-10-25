@@ -142,15 +142,85 @@ Observed, not fixed:
 - A capture costs about 0.35-0.45 s end to end, including starting `NativeHost`, and about
   1.2 MB (110 KB gzipped) on a 36x36 map.
 
+## Playing by hand
+
+The handover no longer needs scripts.
+
+- **Play.** The app's **Play HotA** writes `HeroesPost.relay.ini` with the player's lobby
+  token as `ticket=` and opens their HotA copy. Players host and join in HotA's own
+  New Game, Multiplayer, TCP/IP screens; the relay lists every session on the server.
+  Chat is HotA's own. The relay binds each seat to the account whose ticket created it.
+- **Saving.** While HotA runs, the app's seat keeper (`SeatKeeper`) uploads captures to
+  `POST /api/relay/games/{id}/captures`: at the start of each day, at most every 20 seconds
+  after the player has sent game messages, and at End Turn, through a completion capture
+  armed in advance. A capture taken mid-turn no longer disarms the End Turn capture. The
+  server keeps the newest captures per seat (`Relay:CaptureDirectory`) and refuses one that
+  consumed fewer relay messages than the stored one.
+- **Stand-ins.** `StandInManager` watches the relay. Ten seconds after a seat goes away
+  (`StandIn:GraceSeconds`), it resumes that seat's latest capture in a free server copy
+  (`StandIn:Copies`, separated by `;`, with `StandIn:NativeDirectory`). The stand-in
+  authenticates with a ticket of its own, which may take any held seat. It fights battles
+  with auto-combat and accepts dialogs with Enter. It stores a capture at the start of each
+  day. If the seat's turn is not ended when the game's turn limit has passed since the day
+  began, it arms a completion capture and ends the turn. The limit defaults to
+  `StandIn:TurnSeconds` (600) and can be changed per game in the app. Failed stand-ins
+  back off before the next attempt.
+- **Continue.** `POST /api/relay/games/{id}/claim` captures and closes the seat's stand-in,
+  unless its turn was already ended and stored. It then holds off new stand-ins for three
+  minutes. The app downloads the latest capture, writes `rejoin=`/`seat=` and resumes it,
+  and the seat keeper takes over.
+- **Maps.** Captures record the scenario file (`map_file`, from `world+0x1F6D9`), and resume
+  starts its scaffold from that map instead of Judgement Day. The map must be installed in
+  the resuming copy, including the server's stand-in copies.
+
+Relay ini values are written in Latin-1: HotA's session names contain a non-ASCII separator
+between the game name and the host's name, and the relay compares raw bytes. Captures and
+rejoins also carry the seat's sent-message count (`relay_sent`, `sent=`). The relay logs a
+warning when a capture had sent fewer messages than the seat did, because the player's later
+actions are then missing from it.
+
+### Verification, 2026-10-25
+
+Two players on Judgement Day, launched with `NativeHost play`. That command runs the same
+`RelayPlay` and `SeatKeeper` code as the app's buttons. The game itself was started with
+the scripted scenario setup, not by hand in HotA's menus (`.scratch/relay-dev/e2e-run.sh`).
+The server had two stand-in copies and a 60-second turn limit.
+
+1. Both seat keepers uploaded a day-1 capture once the map appeared. Each seat was bound to
+   its player's account.
+2. Blue moved, ended the turn and was killed. Its End Turn capture reached the server first.
+   A stand-in resumed it and claimed Blue's seat, and the relay replayed messages 533..556.
+   Red moved and ended day 1. On day 2 the stand-in matched Red in heroes, armies,
+   resources and monsters; movement points differed as before.
+3. Red ended day 2. The stand-in stored its day-2 capture and ended Blue's turn once the
+   limit had passed, with its own completion capture stored. On day 3 both clients matched.
+4. Blue continued: the claim captured and closed the stand-in, and Blue's HotA resumed the
+   capture and rejoined. Blue matched Red. Both moved and ended day 3, and on day 4 they
+   matched again.
+
+The C# suite passes, 37 tests. They include the relay's account-bound seats, per-game turn
+limits, and a headless app test: Play, the game list and the turn limit, with a fake HotA
+launcher. The native suites pass.
+
+Observed, not explained: on Continue the relay warned that the stand-in's capture had sent
+174 of the seat's 176 messages. The worlds still matched on days 3 and 4. The two missing
+messages may be traffic the stand-in sent after its capture and before it closed. This has
+not been checked.
+
 ### Not yet done
 
-- The handover is orchestrated by test scripts. Captures move through local files.
-  Nothing yet uploads captures through the relay, launches stand-ins on the server, or
-  hands a seat back when its player connects.
-- A process that crashes or quits mid-turn without a capture can only resume from its
-  last capture; moves since then are lost.
-- Not yet tested: contact between human players (which ends simultaneous turns); more
-  than two humans, which also needs the start path to accept more than two peers; large
-  maps.
+- **Hosting and joining by hand in HotA's TCP/IP screens is not yet verified.** Test
+  scripts can only drive the scripted start path, because HotA ignores posted mouse input.
+  The relay's session list and join path are the ones the scripted start uses.
+- The relay keeps sessions, seats and delivery logs only in memory. Restarting the server
+  ends every running game. Captures survive on disk, but nothing can rejoin them.
+- A player who quits mid-turn loses actions taken since the last capture, at most about
+  20 seconds of play. The relay detects this and logs a warning.
+- Not yet tested: contact between human players (which ends simultaneous turns); more than
+  two humans; large maps; a stand-in's battles against a human.
+- Stand-ins need a Windows server with prepared HotA copies; the Docker image has none.
+  Without stand-ins, an away seat's turn waits for its player.
+- The player's lobby token is stored in plain text in the relay ini inside their own HotA
+  copy.
 - HD's start-up update check once replaced `HD_HOTA.dll` in a test copy. The launcher
   now sets `<Update.CheckAtStart> = 0` in owned copies.

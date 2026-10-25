@@ -2,6 +2,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /source
 COPY global.json Directory.Build.props ./
 COPY src/HeroesLobby.Contracts/ src/HeroesLobby.Contracts/
+COPY src/HeroesLobby.NativeHost/ src/HeroesLobby.NativeHost/
 COPY src/HeroesLobby.Server/ src/HeroesLobby.Server/
 RUN dotnet publish src/HeroesLobby.Server -c Release -o /app
 
@@ -10,6 +11,7 @@ WORKDIR /app
 COPY --from=build /app .
 ENV URLS=http://0.0.0.0:8080
 ENV Lobby__Database=/data/lobby.db
+ENV Relay__CaptureDirectory=/data/relay-captures
 RUN mkdir /data && chown app:app /data
 USER app
 EXPOSE 8080 5090

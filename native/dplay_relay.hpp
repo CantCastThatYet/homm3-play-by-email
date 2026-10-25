@@ -18,13 +18,14 @@ struct Config {
     std::string rejoin_session; // running game to rejoin (name prefix); empty for a normal client
     std::string rejoin_seat;    // held seat (player name) this client takes over
     std::uint32_t rejoin_from = 0; // messages the captured seat had consumed; the relay replays the rest
+    std::uint32_t rejoin_sent = 0; // messages the captured seat had sent; the relay compares it with its own count
     // Game messages the captured engine had received but HD's simultaneous-turn queue still held
     // (deferred= file of u32 length + message). Re-delivered once, first, when game messages are released.
     std::vector<std::vector<std::uint8_t>> rejoin_deferred;
     std::wstring log_path;     // empty disables logging
 };
 
-// Reads key=value lines (host, port, ticket, name, rejoin, seat, from, deferred). Missing file is not an error:
+// Reads key=value lines (host, port, ticket, name, rejoin, seat, from, sent, deferred). Missing file is not an error:
 // returns false with an empty error so callers keep stock DirectPlay.
 bool ReadConfig(const std::wstring& path, Config& config, std::string* error);
 
@@ -39,6 +40,8 @@ std::uint32_t RejoinDeferredCount() noexcept;
 // Game messages from the relay the engine has taken with Receive, counted from the
 // start of the session (a rejoin continues the count it resumed from).
 std::uint32_t ConsumedCount() noexcept;
+// Game messages this seat has sent through the relay, continuing a rejoined seat's captured count.
+std::uint32_t SentCount() noexcept;
 // A rejoining client restores its captured seat before it may see game messages:
 // Receive withholds them (system messages still flow) until this is called.
 void ReleaseGameMessages() noexcept;

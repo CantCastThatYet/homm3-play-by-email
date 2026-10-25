@@ -79,6 +79,10 @@ struct CaptureEnvelope {
     std::vector<DeferredPacket> deferred_packets;
     // Relay game messages the engine had consumed at capture; -1 without the relay.
     std::int64_t relay_consumed = -1;
+    // Game messages this seat had sent through the relay; -1 without the relay.
+    std::int64_t relay_sent = -1;
+    // Scenario file the world was started from (world+0x1F6D9), e.g. "Judgement Day.h3m".
+    std::string map_file;
 };
 
 CaptureEnvelope CaptureExistingBranch(const CaptureRequest& request) noexcept;

@@ -199,16 +199,22 @@ void Log(const std::string& line) {
         logBytes += text.size();
     } catch (...) {}
 }
+std::string GuidText(const GUID& g) {
+    char b[40]; std::snprintf(b, sizeof b, "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", static_cast<unsigned long>(g.Data1), g.Data2, g.Data3,
+        g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]); return b;
+}
 std::string Hex(DWORD v) { char b[16]; std::snprintf(b, sizeof b, "%08lx", static_cast<unsigned long>(v)); return b; }
 
 // -------------------------------------------------------------- statistics
-std::atomic<unsigned> statSent{0}, statDelivered{0}, statSystem{0}, statObjects{0};
+std::atomic<std::uint32_t> statSent{0};
+std::atomic<unsigned> statDelivered{0}, statSystem{0}, statObjects{0};
 std::atomic<bool> statConnected{false}, statOpen{false};
 std::atomic<std::uint32_t> statConsumed{0};
 std::atomic<bool> holdGameMessages{false};
 std::map<std::uint32_t, std::string> rejoinNames; // guarded by statusMutex
 std::mutex statusMutex;
-std::string statusSession, statusError;
+std::string statusSession, statusError, statusInstance;
+std::uint32_t statusSeat = 0; // local player id in the open session
 Config installedConfig;
 std::atomic<bool> installed{false};
 
@@ -250,6 +256,7 @@ public:
             if (!claimed) ++session.current_players;
             if (!config.rejoin_seat.empty()) seatId = created;
         }
+        { std::lock_guard<std::mutex> lock(statusMutex); statusSeat = created; }
         *id = created; Log("CreatePlayer " + Short(name) + " -> " + Hex(created) + " flags " + Hex(flags)); return DP_OK;
     }
     virtual HRESULT WINAPI DeletePlayerFromGroup(DPID group, DPID player) { return Member(group, player, false); }
@@ -337,7 +344,7 @@ public:
         // running game instead of creating a new session.
         const bool rejoin = mode == DPOPEN_CREATE && !config.rejoin_seat.empty();
         Writer w(rejoin ? C_REJOIN : C_OPEN); w.u32(0);
-        if (rejoin) w.str(config.rejoin_session).str(config.rejoin_seat).u32(config.rejoin_from);
+        if (rejoin) w.str(config.rejoin_session).str(config.rejoin_seat).u32(config.rejoin_from).u32(config.rejoin_sent);
         else { w.u32(mode); WriteSession(w, FromDesc(*desc)); }
         std::vector<std::uint8_t> reply; const HRESULT hr = Request(std::move(w), &reply);
         Log(std::string("Open ") + (rejoin ? "rejoin " + config.rejoin_session + " as " + config.rejoin_seat : std::string(mode == DPOPEN_CREATE ? "create " : "join ") + (desc->lpszSessionNameA ? desc->lpszSessionNameA : "")) + " -> " + Hex(hr));
@@ -361,12 +368,13 @@ public:
             session = std::move(s); entities = std::move(snapshot); queue.clear();
             host = mode == DPOPEN_CREATE && !rejoin; open = true;
             statConsumed = rejoin ? config.rejoin_from : 0;
+            statSent = rejoin ? config.rejoin_sent : 0;
             // Events the relay sent after this reply but before this thread woke.
             auto pending = std::move(early); early.clear();
             for (auto& frame : pending) HandleLocked(frame);
         }
         statOpen = true;
-        { std::lock_guard<std::mutex> lock(statusMutex); statusSession = session.name; }
+        { std::lock_guard<std::mutex> lock(statusMutex); statusSession = session.name; statusInstance = GuidText(session.instance); }
         return DP_OK;
     }
     virtual HRESULT WINAPI Receive(DPID* from, DPID* to, DWORD flags, void* data, DWORD* size) {
@@ -924,6 +932,7 @@ bool ReadConfig(const std::wstring& path, Config& config, std::string* error) {
         else if (key == "rejoin") c.rejoin_session = value;
         else if (key == "seat") c.rejoin_seat = value;
         else if (key == "from") { try { c.rejoin_from = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
+        else if (key == "sent") { try { c.rejoin_sent = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
         else if (key == "deferred" && !ReadDeferred(hp::Parent(path) + L"\\" + std::wstring(value.begin(), value.end()), c.rejoin_deferred)) {
             if (error) *error = "relay_deferred_file_invalid"; return false;
         }
@@ -972,6 +981,7 @@ bool Install(const Config& config, std::string* error) {
 }
 bool Installed() noexcept { return installed.load(); }
 std::uint32_t ConsumedCount() noexcept { return statConsumed.load(); }
+std::uint32_t SentCount() noexcept { return statSent.load(); }
 void ReleaseGameMessages() noexcept { holdGameMessages = false; }
 bool RejoinPlayerName(std::uint32_t id, std::string& name) {
     std::lock_guard<std::mutex> lock(statusMutex);
@@ -983,12 +993,12 @@ bool Rejoining() noexcept { return installed.load() && !installedConfig.rejoin_s
 std::uint32_t RejoinDeferredCount() noexcept { return Rejoining() ? static_cast<std::uint32_t>(installedConfig.rejoin_deferred.size()) : 0; }
 
 std::string StatusJson() {
-    std::ostringstream o; std::string session, error;
-    { std::lock_guard<std::mutex> lock(statusMutex); session = statusSession; error = statusError; }
+    std::ostringstream o; std::string session, error, instance; std::uint32_t seat = 0;
+    { std::lock_guard<std::mutex> lock(statusMutex); session = statusSession; error = statusError; instance = statusInstance; seat = statusSeat; }
     o << "{\"installed\":" << (installed.load() ? "true" : "false")
       << ",\"host\":" << hp::Json(installedConfig.host) << ",\"port\":" << installedConfig.port
       << ",\"objects\":" << statObjects.load() << ",\"connected\":" << (statConnected.load() ? "true" : "false")
-      << ",\"sessionOpen\":" << (statOpen.load() ? "true" : "false") << ",\"session\":" << hp::Json(session)
+      << ",\"sessionOpen\":" << (statOpen.load() ? "true" : "false") << ",\"session\":" << hp::Json(session) << ",\"instance\":" << hp::Json(instance) << ",\"seat\":" << seat
       << ",\"rejoinSeat\":" << hp::Json(installedConfig.rejoin_seat) << ",\"consumed\":" << statConsumed.load()
       << ",\"sent\":" << statSent.load() << ",\"delivered\":" << statDelivered.load() << ",\"system\":" << statSystem.load()
       << ",\"error\":" << hp::Json(error) << '}';

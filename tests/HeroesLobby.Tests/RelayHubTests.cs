@@ -130,4 +130,62 @@ public class RelayHubTests
         hub.Handle(ahead, Body(new FrameWriter(RelayProtocol.Rejoin).U32(2).Str("Game").Str("Blue").U32(1000)));
         Assert.Equal(RelayProtocol.ErrInvalidParams, ahead.ReplyResult(2));
     }
+
+    private static void Hello(RelayHub hub, Peer peer, string ticket) =>
+        hub.Handle(peer, Body(new FrameWriter(RelayProtocol.Hello).U32(RelayProtocol.Version).Str(ticket).Str(peer.Label)));
+
+    private static RelayHub AccountHub()
+    {
+        var hub = Hub();
+        hub.Authenticate = ticket => ticket switch
+        {
+            "red-token" => new RelayAccount("red-id", "Red player"),
+            "blue-token" => new RelayAccount("blue-id", "Blue player"),
+            "standin-token" => new RelayAccount("standin", "Stand-in", StandIn: true),
+            _ => null
+        };
+        return hub;
+    }
+
+    [Fact]
+    public void SeatsBelongToTheAccountThatCreatedThem()
+    {
+        var hub = AccountHub(); var red = new Peer("red"); var blue = new Peer("blue");
+        Hello(hub, red, "red-token"); Hello(hub, blue, "blue-token");
+        hub.Handle(red, Body(Session(new FrameWriter(RelayProtocol.Open).U32(1).U32(RelayProtocol.OpenCreate))));
+        var redId = CreatePlayer(hub, red, 2, RelayProtocol.PlayerServer, "Red");
+        hub.Handle(blue, Body(Session(new FrameWriter(RelayProtocol.Open).U32(1).U32(RelayProtocol.OpenJoin))));
+        var blueId = CreatePlayer(hub, blue, 2, 0, "Blue");
+        Send(hub, red, redId, 0, Message(GameMessage.LoadGame, redId));
+        Send(hub, blue, blueId, 0, Message(GameMessage.LoadReceipt, blueId));
+        Send(hub, blue, blueId, 0, Message(GameMessage.LoadReceipt, blueId));
+
+        var game = hub.Games().Single();
+        Assert.Equal("red-id", game.Seats.Single(s => s.Id == redId).Account);
+        var blueSeat = game.Seats.Single(s => s.Id == blueId);
+        Assert.Equal(("blue-id", 2, false), (blueSeat.Account, blueSeat.Sent, blueSeat.Away));
+
+        hub.Disconnected(blue);
+        Assert.True(hub.Games().Single().Seats.Single(s => s.Id == blueId) is { Away: true, AwaySince: not null });
+        // Another player cannot take Blue's seat; Blue's own account and the server's stand-in can.
+        var intruder = new Peer("intruder"); Hello(hub, intruder, "red-token");
+        hub.Handle(intruder, Body(new FrameWriter(RelayProtocol.Rejoin).U32(5).Str("Game").Str("Blue").U32(0).U32(2)));
+        Assert.Equal(RelayProtocol.ErrAccessDenied, intruder.ReplyResult(5));
+        var standIn = new Peer("standin"); Hello(hub, standIn, "standin-token");
+        hub.Handle(standIn, Body(new FrameWriter(RelayProtocol.Rejoin).U32(6).Str("Game").Str("Blue").U32(0).U32(2)));
+        Assert.Equal(RelayProtocol.Ok, standIn.ReplyResult(6));
+        Assert.Equal(blueId, CreatePlayer(hub, standIn, 7, RelayProtocol.PlayerServer, "HeroesPost"));
+        Assert.True(hub.Games().Single().Seats.Single(s => s.Id == blueId) is { Away: false, StandIn: true, Account: "blue-id" });
+    }
+
+    [Fact]
+    public void TurnLimitIsKeptPerGame()
+    {
+        var (hub, _, _, _, _) = StartedGame();
+        var id = hub.Games().Single().Instance;
+        Assert.Null(hub.Games().Single().TurnSeconds);
+        Assert.True(hub.SetTurnSeconds(id, 900));
+        Assert.Equal(900, hub.Games().Single().TurnSeconds);
+        Assert.False(hub.SetTurnSeconds(Guid.NewGuid(), 60));
+    }
 }

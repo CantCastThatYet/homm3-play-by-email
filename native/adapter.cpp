@@ -17,6 +17,7 @@
 #include "vendor/patcher_x86.hpp"
 #include <psapi.h>
 #include <sddl.h>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <memory>
@@ -72,6 +73,16 @@ void BeginSession(const hota_menu::Dispatch& dispatch, void*) noexcept {
 }
 
 void CaptureCurrentAtBoundary() noexcept;
+// Session facts a resume needs besides the world: the relay position and the scenario file.
+void AddSessionState(hota_capture::CaptureEnvelope& envelope) {
+    if (hp_relay::Installed()) { envelope.relay_consumed = hp_relay::ConsumedCount(); envelope.relay_sent = hp_relay::SentCount(); }
+    std::uint32_t world = 0; char name[252]{};
+    if (hp::Read(0x699538, world) && world && hp::Read(world + 0x1f6d9, name)) {
+        name[251] = 0; const std::string file(name);
+        if (std::all_of(file.begin(), file.end(), [](unsigned char c) { return c >= 32 && c < 127 && c != '/' && c != '\\' && c != ':'; }))
+            envelope.map_file = file;
+    }
+}
 bool LeaseBlocksGameplay() noexcept {
     // A relay rejoin owns its seat through the relay, which admits one live
     // connection per seat; the lobby branch lease does not apply.
@@ -178,7 +189,7 @@ void CaptureCompletion(const hota_completion::Snapshot& snapshot, void*) noexcep
         request.limits.max_stream_bytes = 32u * 1024 * 1024;
         request.limits.max_deferred_bytes = 4u * 1024 * 1024;
         auto result = std::make_unique<hota_capture::CaptureEnvelope>(hota_capture::CaptureExistingBranch(request));
-        if (hp_relay::Installed()) result->relay_consumed = hp_relay::ConsumedCount();
+        AddSessionState(*result);
         if (result->status != "captured" || !result->metadata_valid || result->local_player != snapshot.local_player || result->current_player != snapshot.current_player ||
             result->st_day != snapshot.st_day || !result->world_date_valid ||
             result->world_date_words[0] != snapshot.world_date_words[0] || result->world_date_words[1] != snapshot.world_date_words[1] ||
@@ -278,7 +289,7 @@ void CaptureAfterSave() noexcept {
         request.limits.max_stream_bytes = 32u * 1024 * 1024;
         request.limits.max_deferred_bytes = 4u * 1024 * 1024;
         auto result = std::make_unique<hota_capture::CaptureEnvelope>(hota_capture::CaptureExistingBranch(request));
-        if (hp_relay::Installed()) result->relay_consumed = hp_relay::ConsumedCount();
+        AddSessionState(*result);
         if(auditedCapturePending)AddRecoveryAudit(*result,pendingCaptureAudit);
         {
             std::lock_guard<std::mutex> lock(stateMutex);
@@ -496,6 +507,9 @@ std::string Probe() {
     unsigned map = 0, scenario = 1, simultaneous = 0;
     const bool mapPresent = mainRead && hp::Read(main + 0x1fc40, map) && map != 0;
     if (supported) { hp::Read(0x69fc44, scenario); if (hdBase.load()) hp::Read(hdBase.load() + 0x210042, simultaneous); }
+    // The combat manager's state is 1 from the start of a battle until its result dialog closes.
+    unsigned combatManager = 0, combatState = 0;
+    const bool combat = supported && hp::Read(0x699420, combatManager) && combatManager && hp::Read(combatManager + 0x34, combatState) && combatState == 1;
     std::lock_guard<std::mutex> lock(stateMutex);
     const char* status = telemetryState.load() == 2 ? "active" : telemetryState.load() == 1 ? "pending_game_thread" : telemetryState.load() == -1 ? "failed" : "disabled";
     std::ostringstream o;
@@ -513,7 +527,8 @@ std::string Probe() {
       << ",\"game\":{\"mainPresent\":" << (mainRead ? "true" : "false") << ",\"currentColor\":" << current << ",\"localColor\":" << local
       << ",\"network\":" << network << ",\"dateValid\":" << (dateRead ? "true" : "false") << ",\"date\":{\"day\":" << date[0] << ",\"week\":" << date[1] << ",\"month\":" << date[2] << "}"
       << ",\"adventureMapPresent\":" << (mapPresent ? "true" : "false") << ",\"scenarioOpen\":" << (scenario ? "true" : "false")
-      << ",\"simultaneousTurns\":" << (simultaneous == 1 ? "true" : "false") << '}'
+      << ",\"simultaneousTurns\":" << (simultaneous == 1 ? "true" : "false")
+      << ",\"combatActive\":" << (combat ? "true" : "false") << '}'
       << ",\"nativePhase\":{\"modalDepth\":" << modalDepth << ",\"moveReminder\":" << moveReminder
       << ",\"exitPending\":" << exitPending << ",\"protectedExit\":" << protectedExit << ",\"participants\":[";
     for(unsigned color=0;color<8;++color) {
@@ -532,6 +547,7 @@ std::string Probe() {
       << ",\"afterAudit\":" << (restored.audit_read?hota_resume::SerializeAudit(restored.after):"null") << '}'
       << ",\"leaseHeld\":" << (LeaseBlocksGameplay()?"true":"false")
       << ",\"captureRoot\":" << hp::Json(hp::Utf8(captureRoot)) << ",\"captureStatus\":" << hp::Json(captureStatus)
+      << ",\"completionArmed\":" << (completionCaptureRequested.load() ? "true" : "false")
       << ",\"captureError\":" << hp::Json(captureError) << ",\"lastCaptureManifest\":" << hp::Json(lastCaptureManifest)
       << ",\"sessionBootstrap\":{\"status\":" << hp::Json(hota_session::StatusName(session.status))
       << ",\"token\":" << session.token << ",\"localPlayerId\":" << session.local_player_id
@@ -603,7 +619,8 @@ std::string Command(const std::string& input) {
         if(telemetryState.load()!=2||hota_session::IsScaffoldRestorePending())return hp::Error("not_ready","Native gameplay is not initialized.");
         std::lock_guard<std::mutex> lock(stateMutex);
         if(captureStatus=="copying"||captureStatus=="writing"||currentCaptureRequested.load())return hp::Error("capture_busy","A native checkpoint is in progress.");
-        captureRequested.store(false);completionCaptureRequested.store(false);completionSnapshotRequested.store(false);
+        // A pending End Turn capture stays armed: it is taken at the completion marker, this one at an idle moment.
+        captureRequested.store(false);
         captureStatus="armed";captureError.clear();currentCaptureRequested.store(true);
         return "{\"protocol\":1,\"ok\":true,\"status\":\"queued_current_branch\"}";
     }

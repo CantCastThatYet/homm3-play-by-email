@@ -1,13 +1,13 @@
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
-using HeroesLobby.Contracts;
 using HeroesLobby.Desktop;
+using HeroesLobby.NativeHost;
+using HeroesLobby.Server.Relay;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 [assembly: AvaloniaTestApplication(typeof(HeroesLobby.Tests.TestAppBuilder))]
@@ -38,62 +38,84 @@ public class DesktopTests
         using var image = window.CaptureRenderedFrame(); Assert.NotNull(image); image.Save(Path.Combine(folder, name), Avalonia.Media.Imaging.PngBitmapEncoderOptions.Default);
     }
 
+    /// <summary>Records launches instead of starting HotA; Keep returns when the test closes "HotA".</summary>
+    private sealed class FakeLauncher : IHotaLauncher
+    {
+        public RelayEndpoint? Played;
+        public readonly TaskCompletionSource Closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<int> Play(string root, RelayEndpoint relay, CancellationToken cancellation) { Played = relay; return Task.FromResult(4242); }
+        public Task<int> Continue(string root, RelayEndpoint relay, RelayApi api, Guid game, string downloads, CancellationToken cancellation) =>
+            throw new InvalidOperationException("not expected");
+        public async Task Keep(int pid, RelayApi api, Action<string> report, CancellationToken cancellation)
+        {
+            report("Position saved on the server.");
+            await Closed.Task.WaitAsync(cancellation);
+        }
+    }
+
+    private sealed class Peer : IRelayPeer
+    {
+        public string Label => "hota";
+        public void Post(byte[] frame) { }
+    }
+
     [AvaloniaFact]
-    public async Task Desktop_can_connect_create_configure_lock_and_reconnect_to_persistent_lobby()
+    public async Task Desktop_plays_through_the_relay_and_lists_the_players_games()
     {
         var prior = Environment.GetEnvironmentVariable("HEROES_POST_PROFILE");
-        Environment.SetEnvironmentVariable("HEROES_POST_PROFILE", Path.Combine(Path.GetTempPath(), "heroes-post-ui", Guid.NewGuid().ToString("N")));
+        var profileDirectory = Path.Combine(Path.GetTempPath(), "heroes-post-ui", Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("HEROES_POST_PROFILE", profileDirectory);
         await using var server = new LobbyFactory(); server.UseKestrel(0); using var api = server.CreateClient();
-        var window = new MainWindow(); window.Show();
+        var launcher = new FakeLauncher();
+        var window = new MainWindow(new LocalProfile { NativeGameRoot = "C:/HotA-copy", StorageDirectory = profileDirectory }, launcher); window.Show();
         try
         {
             Capture(window, "01-disconnected.png");
+            Assert.False(Control<Button>(window, "PlayButton").IsEnabled);
             Control<TextBox>(window, "ServerAddress").Text = api.BaseAddress!.AbsoluteUri;
             Control<TextBox>(window, "PlayerName").Text = "Rowan";
             Click(Control<Button>(window, "ConnectButton"));
-            await Until(() => Control<Button>(window, "CreateButton").IsEffectivelyEnabled);
-            Assert.False(Control<Border>(window, "MessagePanel").IsVisible);
-            Click(Control<Button>(window, "CreateButton"));
-            await Until(() => window.OwnedWindows.OfType<CreateGameWindow>().Any());
-            var dialog = window.OwnedWindows.OfType<CreateGameWindow>().Single();
-            var inputs = dialog.GetVisualDescendants().OfType<TextBox>().ToList();
-            inputs[0].Text = "The Long Campaign"; inputs[1].Text = "Islands of the North - XL";
-            Capture(dialog, "02-create-game.png");
-            Click(dialog.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Create game")));
-            await Until(() => Control<ListBox>(window, "GameList").ItemCount == 1 && Control<Button>(window, "SaveSettingsButton").IsEffectivelyEnabled);
-            var game = (await api.GetFromJsonAsync<List<GameInfo>>("api/games", cancellationToken: TestContext.Current.CancellationToken))!.Single();
-            var registration = await api.PostAsJsonAsync("api/players", new RegisterPlayer("Mira"), cancellationToken: TestContext.Current.CancellationToken); registration.EnsureSuccessStatusCode();
-            var friend = (await registration.Content.ReadFromJsonAsync<PlayerCredentials>(cancellationToken: TestContext.Current.CancellationToken))!;
-            api.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", friend.Token);
-            (await api.PostAsJsonAsync($"api/games/{game.Id}/join", new JoinGame(null), cancellationToken: TestContext.Current.CancellationToken)).EnsureSuccessStatusCode();
-            await Until(() => Control<ItemsControl>(window, "Members").ItemCount == 2);
-            Control<ComboBox>(window, "FactionChoice").SelectedItem = "Rampart";
-            Control<ComboBox>(window, "BonusChoice").SelectedItem = "Gold";
-            Click(Control<Button>(window, "SaveSettingsButton"));
-            await Until(() => Control<Button>(window, "ReadyButton").IsEffectivelyEnabled && Control<ItemsControl>(window, "Members").Items.OfType<MemberRow>().Any(m => m.Member.Faction == "Rampart"));
-            Click(Control<Button>(window, "ReadyButton"));
-            await Until(() => Equals(Control<Button>(window, "ReadyButton").Content, "Not ready") && Control<Button>(window, "ReadyButton").IsEffectivelyEnabled);
-            game = (await api.GetFromJsonAsync<GameInfo>($"api/games/{game.Id}", cancellationToken: TestContext.Current.CancellationToken))!;
-            (await api.PutAsJsonAsync($"api/games/{game.Id}/ready", new ReadyRequest(game.Revision, true), cancellationToken: TestContext.Current.CancellationToken)).EnsureSuccessStatusCode();
-            await Until(() => Control<Button>(window, "LockButton").IsEffectivelyEnabled);
-            Capture(window, "03-ready-lobby.png");
-            Click(Control<Button>(window, "LockButton"));
-            await Until(() => Control<TextBlock>(window, "DetailStatus").Text == "PARTY PREPARED" && Control<Button>(window, "ConnectButton").IsEffectivelyEnabled);
-            Assert.False(Control<StackPanel>(window, "SettingsPanel").IsEffectivelyEnabled);
-            Capture(window, "04-prepared-lobby.png");
-            Click(Control<Button>(window, "ConnectButton"));
-            await Until(() => Equals(Control<Button>(window, "ConnectButton").Content, "Connect to server") && Control<Button>(window, "ConnectButton").IsEffectivelyEnabled);
-            Click(Control<Button>(window, "ConnectButton"));
-            await Until(() => Control<ListBox>(window, "GameList").ItemCount == 1 && Control<Button>(window, "CreateButton").IsEffectivelyEnabled);
-            Control<ListBox>(window, "GameList").SelectedIndex = 0;
-            Assert.Equal("PARTY PREPARED", Control<TextBlock>(window, "DetailStatus").Text);
-            Assert.Equal(2, Control<ItemsControl>(window, "Members").ItemCount);
-            Assert.False(Control<Button>(window, "JoinButton").IsVisible);
+            await Until(() => Control<Button>(window, "PlayButton").IsEffectivelyEnabled);
+            Assert.True(Control<StackPanel>(window, "EmptyList").IsVisible);
+
+            // Play opens HotA on the server's relay as this player.
+            Click(Control<Button>(window, "PlayButton"));
+            await Until(() => launcher.Played is not null && Control<TextBlock>(window, "GameStatus").Text == "Position saved on the server.");
+            var relay = server.Services.GetRequiredService<RelayServer>();
+            Assert.Equal(relay.Port, launcher.Played!.Port);
+            Assert.Equal(api.BaseAddress.Host, launcher.Played.Host);
+            Assert.False(Control<Button>(window, "PlayButton").IsEnabled);
+
+            // That HotA hosts a game in its own multiplayer screen, which starts, then closes.
+            var hub = server.Services.GetRequiredService<RelayHub>();
+            var hota = new Peer();
+            static byte[] Body(FrameWriter w) => w.Finish()[4..];
+            hub.Handle(hota, Body(new FrameWriter(RelayProtocol.Hello).U32(RelayProtocol.Version).Str(launcher.Played.Ticket).Str("rowan")));
+            hub.Handle(hota, Body(new FrameWriter(RelayProtocol.Open).U32(1).U32(RelayProtocol.OpenCreate).Guid(Guid.NewGuid()).Guid(Guid.Empty)
+                .U32(RelayProtocol.SessionMigrateHost).U32(8).U32(0).Str("Sunday\u00fcRowan").Str("").U32(0).U32(0).U32(0).U32(0)));
+            hub.Handle(hota, Body(new FrameWriter(RelayProtocol.CreatePlayer).U32(2).U32(RelayProtocol.PlayerServer).Str("Rowan").Str("Rowan").Blob([])));
+            byte[] start = [.. BitConverter.GetBytes(0u), .. BitConverter.GetBytes(1u), .. BitConverter.GetBytes(GameMessage.LoadGame), .. BitConverter.GetBytes(24u), .. new byte[8]];
+            hub.Handle(hota, Body(new FrameWriter(RelayProtocol.Send).U32(RelayProtocol.ServerPlayerId).U32(0).U32(0).Blob(start)));
+            launcher.Closed.SetResult(); hub.Disconnected(hota);
+            await Until(() => Control<Button>(window, "PlayButton").IsEffectivelyEnabled);
+            Click(Control<Button>(window, "RefreshButton"));
+            await Until(() => Control<ItemsControl>(window, "GameList").ItemCount == 1);
+            var row = Control<ItemsControl>(window, "GameList").Items.OfType<RelayGameRow>().Single();
+            Assert.Equal("Sunday", row.Title);
+            Assert.Equal("Away", row.Game.State);
+            Assert.False(row.CanContinue); // nothing saved for the seat yet
+            Capture(window, "02-your-games.png");
+
+            // The turn limit an away seat's stand-in waits is chosen per game.
+            var limit = window.GetVisualDescendants().OfType<ComboBox>().Single();
+            Assert.Equal("10 minutes", limit.SelectedItem); // the server default
+            limit.SelectedIndex = 4;
+            await Until(() => hub.Games().Single().TurnSeconds == 3600);
         }
         catch (Exception error)
         {
             Capture(window, "failure.png");
-            throw new InvalidOperationException($"{error.Message} UI message: {Control<TextBlock>(window, "MessageText").Text}; Ready: {Control<Button>(window, "ReadyButton").Content}", error);
+            throw new InvalidOperationException($"{error.Message} UI message: {Control<TextBlock>(window, "MessageText").Text}", error);
         }
         finally { window.Close(); Environment.SetEnvironmentVariable("HEROES_POST_PROFILE", prior); }
     }

@@ -26,4 +26,9 @@ namespace HeroesLobby.Contracts;
 [JsonSerializable(typeof(ResumeLeaseToken))]
 [JsonSerializable(typeof(ReleaseResumeLease))]
 [JsonSerializable(typeof(PublishNativeBranch))]
+[JsonSerializable(typeof(RelayServerInfo))]
+[JsonSerializable(typeof(RelayGameInfo))]
+[JsonSerializable(typeof(List<RelayGameInfo>))]
+[JsonSerializable(typeof(RelayClaim))]
+[JsonSerializable(typeof(RelayTurnLimit))]
 public partial class LobbyJsonContext : JsonSerializerContext;

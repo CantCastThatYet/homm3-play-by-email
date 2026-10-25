@@ -2,19 +2,19 @@
 
 A native desktop companion for self-hosted Heroes III communities. Written in C# with Avalonia, ASP.NET Core, SignalR, and SQLite on .NET 10.
 
-**The Windows prototype can start HotA from the lobby and restore a saved player turn while that player is alone.** It starts two original HotA clients with simultaneous turns on Judgement Day, stores each player's native checkpoint, and exposes **Resume HotA** after the clients close. A resumed player can end their turn and automatically upload the completed checkpoint. Shared next-day merging, notifications and offline PvP remain unfinished: this is not yet a complete asynchronous campaign. The server runs no game clients. See [solo resume instructions and limits](docs/solo-resume.md).
+**The Windows prototype plays HotA multiplayer through this server.** HotA's DirectPlay transport is replaced by a relay in the server, so players host and join in HotA's own multiplayer screens and chat in HotA. A player can leave after ending a turn, or mid-turn, and come back later. Meanwhile the server plays their seat with its own HotA copy. It finishes a turn they ended, and ends any other turn after the game's turn limit. See [the relay and its verification](docs/relay-transport.md).
 
 ## Try it
 
-Start the server from this directory with Docker:
+Start the server from this directory. Stand-ins need Windows and prepared HotA copies; see [Playing by hand](docs/relay-transport.md#playing-by-hand):
 
 ```sh
-docker compose up --build -d
+dotnet run --project src/HeroesLobby.Server -- --urls http://0.0.0.0:5080
 ```
 
-Open the updated desktop app, enter `http://localhost:5080` and a player name, then connect. Click **Set up HotA** on each player's app. Create a two-player **Judgement Day** game, join it from the other app, retain Red/Blue and Random starting choices, then mark both players ready. The host launches first; the guest joins automatically. Same-PC testing needs separate profiles and isolated HotA copies. Other maps/preferences and WAN/NAT connectivity are not verified by this startup build.
+Each player opens the desktop app, enters the server address and a name, connects, and clicks **Set up HotA** once. **Play HotA** opens HotA connected to the server. In HotA choose New Game, Multiplayer, TCP/IP, then Host or Join, and turn on simultaneous turns in the game options. Keep the app open while playing: it saves your position on the server. After you leave, your game appears under **Your games** with **Continue**; the turn limit for away seats is chosen there too.
 
-Wait for each lobby to confirm its initial checkpoint is saved. After closing HotA, select the started game and choose **Resume HotA**; the other player does not need to be connected. Keep the lobby open while playing. After End Turn, wait for **Turn saved** before closing HotA. A completed turn reopens held, because shared next-day merging is not implemented. Mid-turn edits are not automatically uploaded; closing before completion can return you to the last server checkpoint.
+The relay listens on TCP port 5090 (`Relay:Port`) next to the HTTP port. Players' copies connect to the server's host name on that port. Only the supported HotA build is accepted; see `NativeBridge.Fingerprints`. Hosting by hand in HotA's menus has not been verified yet, and other limits are listed in the relay document.
 
 The Windows native package is `artifacts/HeroesPost-win-x64.zip` when built locally. Extract the whole folder and run `HeroesLobby.Desktop.exe`; no .NET installation is required. Keep the DLLs beside the executable.
 
@@ -73,13 +73,14 @@ Game passwords control joining. Game names, map labels, rosters, and preferences
 | Project | Responsibility |
 | --- | --- |
 | `HeroesLobby.Contracts` | Versioned lobby DTOs and source-generated JSON metadata |
-| `HeroesLobby.Server` | Authoritative lobby state, SQLite persistence, validation, HTTP API, SignalR hints |
-| `HeroesLobby.Desktop` | Avalonia desktop app, per-server identity, HTTP client, live updates and polling |
+| `HeroesLobby.Server` | Identities, game relay, seat captures, stand-ins, HTTP API; the older lobby API |
+| `HeroesLobby.Desktop` | Avalonia desktop app: per-server identity, Play HotA, Your games, Continue |
+| `HeroesLobby.NativeHost` | HotA adapter control, captures, resume, relay API client and seat keeper |
 | `HeroesLobby.Tests` | Server integration and headless desktop tests |
 
 Writes are transactional and carry a revision where stale changes matter. Settings or roster changes clear readiness. Disconnecting never leaves a game; leaving is an explicit action. The last player leaving removes the game. Leaving as host transfers hosting to the remaining roster. Locked lobbies must be reopened before anyone can change preferences or leave.
 
-The native prototype validates its supported map and frozen two-player configuration. General map labels and hero preferences do not imply support for other native configurations. `GET /api/info` advertises `gameIntegrationAvailable: false` because complete asynchronous campaigns, shared-day progression and offline PvP are not implemented.
+The server still serves the earlier lobby API (games, readiness, scripted native launch and solo-resume branches), but the app no longer uses it: games are created in HotA itself.
 
 ## Build desktop packages
 

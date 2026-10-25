@@ -10,7 +10,30 @@ internal static class Program
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
         try
         {
-            if (args.Length == 3 && args[0] == "prepare") Console.WriteLine(NativeBridge.Prepare(args[1], args[2]));
+            if (args.Length is 5 or 6 && args[0] is "play" or "continue")
+            {
+                // Development stand-in for the app: start or continue a relay game, then keep the seat saved until HotA closes.
+                var token = Environment.GetEnvironmentVariable("HEROES_POST_TOKEN") ?? throw new InvalidOperationException("Set HEROES_POST_TOKEN to the player's token.");
+                var server = new Uri(args[3]);
+                using var http = new HttpClient { BaseAddress = server, Timeout = TimeSpan.FromSeconds(90) };
+                var api = new RelayApi(http, token);
+                var info = await api.Info(cancellation.Token);
+                var relay = new RelayEndpoint(server.Host, info.Port, token, args[4]);
+                var pid = args[0] == "play" ? await RelayPlay.Play(args[1], args[2], relay, cancellation.Token)
+                    : await RelayPlay.Continue(args[1], args[2], relay, api, Guid.Parse(args[5]), Path.Combine(args[1], "HeroesPost.downloads"), cancellation.Token);
+                Console.WriteLine($"HotA PID: {pid}");
+                using var forever = new CancellationTokenSource();
+                Console.CancelKeyPress += (_, _) => forever.Cancel();
+                await new SeatKeeper(pid, api, text => Console.WriteLine($"{DateTime.Now:HH:mm:ss} {text}")).Run(forever.Token);
+                Console.WriteLine("HotA closed.");
+            }
+            else if (args.Length == 2 && args[0] == "games")
+            {
+                var token = Environment.GetEnvironmentVariable("HEROES_POST_TOKEN") ?? throw new InvalidOperationException("Set HEROES_POST_TOKEN to the player's token.");
+                using var http = new HttpClient { BaseAddress = new Uri(args[1]) };
+                foreach (var game in await new RelayApi(http, token).Games(cancellation.Token)) Console.WriteLine(game);
+            }
+            else if (args.Length == 3 && args[0] == "prepare") Console.WriteLine(NativeBridge.Prepare(args[1], args[2]));
             else if (args.Length == 3 && args[0] == "launch") await NativeBridge.Launch(args[1], args[2], cancellation.Token);
             else if(args.Length==5&&args[0]=="resume"&&int.TryParse(args[4],out var resumeColor))
                 Console.WriteLine(await NativeBridge.Resume(args[1],args[2],args[3],resumeColor,cancellation.Token));
@@ -61,7 +84,7 @@ internal static class Program
             }
             else
             {
-                Console.Error.WriteLine("Native integration experiment (Windows, pinned build):\n  prepare <installed-game-directory> <new-isolated-directory>\n  launch <isolated-directory> <native-build-directory>\n  stage-session <isolated-directory> Host|Join <player-name> <session-name> <IPv4> <pid> [map.h3m] [local-port]\n  start-session <isolated-directory> <pid> HostStart|PeerAccept <peer-id-1> <peer-id-2> <map.h3m> <date-MWD>\n  probe <pid> [command]\n  watch-completion <pid> [snapshot]\n  watch-save <pid> <save-basename>\n  queue-capture <manifest-path> <server> <game-id> <player-id> <base-revision> <outbox-directory>\n  send-pending <outbox-directory> <server> <player-id> (token: HEROES_POST_TOKEN)\nThis tool does not yet implement playable asynchronous turns.");
+                Console.Error.WriteLine("Native integration experiment (Windows, pinned build):\n  prepare <installed-game-directory> <new-isolated-directory>\n  launch <isolated-directory> <native-build-directory>\n  stage-session <isolated-directory> Host|Join <player-name> <session-name> <IPv4> <pid> [map.h3m] [local-port]\n  start-session <isolated-directory> <pid> HostStart|PeerAccept <peer-id-1> <peer-id-2> <map.h3m> <date-MWD>\n  probe <pid> [command]\n  play <isolated-directory> <native-build-directory> <server-url> <relay-name>\n  continue <isolated-directory> <native-build-directory> <server-url> <relay-name> <game-id>\n  games <server-url>   (play, continue, games: token in HEROES_POST_TOKEN)\n  watch-completion <pid> [snapshot]\n  watch-save <pid> <save-basename>\n  queue-capture <manifest-path> <server> <game-id> <player-id> <base-revision> <outbox-directory>\n  send-pending <outbox-directory> <server> <player-id> (token: HEROES_POST_TOKEN)\nThis tool does not yet implement playable asynchronous turns.");
                 return 2;
             }
             return 0;

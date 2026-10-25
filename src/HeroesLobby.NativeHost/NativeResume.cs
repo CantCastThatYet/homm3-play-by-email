@@ -48,7 +48,7 @@ public static partial class NativeBridge
             roster.ValueKind == JsonValueKind.Null)
             throw new InvalidDataException("This older checkpoint lacks the native world audit and human-seat data required for solo resume.");
         var relayConfig = Path.Combine(root, "HeroesPost.relay.ini");
-        var relayRejoin = File.Exists(relayConfig) && File.ReadAllLines(relayConfig).Any(l => l.TrimStart().StartsWith("seat=", StringComparison.Ordinal));
+        var relayRejoin = File.Exists(relayConfig) && File.ReadAllLines(relayConfig, RelayEndpoint.Encoding).Any(l => l.TrimStart().StartsWith("seat=", StringComparison.Ordinal));
         // Over the relay, the rejoining client re-delivers these to HD's simultaneous-turn queue.
         if (capture.DeferredCount != 0 && !relayRejoin)
             throw new InvalidDataException("This checkpoint has pending native events which cannot yet be replayed during solo resume.");
@@ -64,9 +64,11 @@ public static partial class NativeBridge
         var st = capture.Files[manifest.GetProperty("raw_st_metadata").GetString()!];
         if (rosterBytes.Length != 187 || st.Length != 156)
             throw new InvalidDataException("The native roster or simultaneous-turn metadata has the wrong size.");
-        // This prototype's launch path freezes this same installed map. The
-        // native loader additionally checks geometry and the entire source audit.
-        const string map = "Judgement Day.h3m";
+        // The scaffold starts the capture's own scenario; the native loader then checks
+        // geometry and the entire source audit. Older captures predate map_file.
+        var map = manifest.TryGetProperty("map_file", out var mapFile) && mapFile.GetString() is { Length: > 0 } recorded ? recorded : "Judgement Day.h3m";
+        if (map.IndexOfAny(['/', '\\', ':']) >= 0 || !File.Exists(Path.Combine(root, "Maps", map)))
+            throw new InvalidOperationException($"This game was played on the map '{map}', which is not installed in {Path.Combine(root, "Maps")}.");
         var target = Path.Combine(root, "HeroesPost.resume.bin");
         if (File.Exists(target)) CaptureBundle.CheckRegularPath(target);
         var temporary = target + ".pending-" + Guid.NewGuid().ToString("N");
@@ -87,9 +89,10 @@ public static partial class NativeBridge
         // then replays the relay's later messages from where the capture's engine stopped.
         if (relayRejoin && manifest.TryGetProperty("relay_consumed", out var consumed) && consumed.GetInt64() >= 0)
         {
-            var lines = File.ReadAllLines(relayConfig).Where(l => !l.TrimStart().StartsWith("from=", StringComparison.Ordinal) &&
-                !l.TrimStart().StartsWith("deferred=", StringComparison.Ordinal)).ToList();
+            var lines = File.ReadAllLines(relayConfig, RelayEndpoint.Encoding).Where(l => !l.TrimStart().StartsWith("from=", StringComparison.Ordinal) &&
+                !l.TrimStart().StartsWith("sent=", StringComparison.Ordinal) && !l.TrimStart().StartsWith("deferred=", StringComparison.Ordinal)).ToList();
             lines.Add($"from={consumed.GetInt64()}");
+            if (manifest.TryGetProperty("relay_sent", out var sent) && sent.GetInt64() >= 0) lines.Add($"sent={sent.GetInt64()}");
             var deferredFile = Path.Combine(root, "HeroesPost.deferred.bin");
             File.Delete(deferredFile);
             if (capture.DeferredCount != 0)
@@ -102,7 +105,7 @@ public static partial class NativeBridge
                     }
                 lines.Add("deferred=HeroesPost.deferred.bin");
             }
-            File.WriteAllLines(relayConfig, lines);
+            File.WriteAllLines(relayConfig, lines, RelayEndpoint.Encoding);
         }
         int pid=0;
         string? launchedIdentity=null;

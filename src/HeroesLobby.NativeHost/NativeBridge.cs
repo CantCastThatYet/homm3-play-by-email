@@ -99,7 +99,7 @@ public static partial class NativeBridge
         throw new InvalidDataException("Native adapter response exceeded 1 MiB.");
     }
 
-    public static async Task<int> Launch(string root, string nativeDirectory, CancellationToken cancellationToken, Action<int,long>? onLaunched=null)
+    public static async Task<int> Launch(string root, string nativeDirectory, CancellationToken cancellationToken, Action<int,long>? onLaunched=null, bool armSaveCapture=true)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("The original HotA adapter currently requires Windows.");
         root = Path.GetFullPath(root); nativeDirectory = Path.GetFullPath(nativeDirectory);
@@ -207,6 +207,7 @@ public static partial class NativeBridge
         }
         if (probe.GetProperty("telemetry").GetProperty("status").GetString() != "active")
             throw new InvalidOperationException("The game thread did not acknowledge native hooks. The test client was left open.");
+        if (!armSaveCapture) return game.Id;
         var capture = await Request(game.Id, "capture_next_save", cancellationToken); Console.WriteLine(capture);
         if (!capture.TryGetProperty("ok", out var armed) || armed.ValueKind != JsonValueKind.True)
             throw new InvalidOperationException("Native capture could not be armed; inspect the response above.");

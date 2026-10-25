@@ -6,9 +6,8 @@
     <PackageReference Include="Avalonia" Version="12.1.4" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
-    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.13" />
   </ItemGroup>
-  <PropertyGroup><NativeAdapterDirectory Condition="'$(NativeAdapterDirectory)' == ''">../../artifacts/native/lobby-x86</NativeAdapterDirectory></PropertyGroup>
+  <PropertyGroup><NativeAdapterDirectory Condition="'$(NativeAdapterDirectory)' == ''">../../artifacts/native/play-x86</NativeAdapterDirectory></PropertyGroup>
   <ItemGroup Condition="Exists('$(NativeAdapterDirectory)/HeroesPost.Native.dll')">
     <Content Include="$(NativeAdapterDirectory)/HeroesPost.Native.dll" Link="native/HeroesPost.Native.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="$(NativeAdapterDirectory)/HeroesPost.Injector.exe" Link="native/HeroesPost.Injector.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

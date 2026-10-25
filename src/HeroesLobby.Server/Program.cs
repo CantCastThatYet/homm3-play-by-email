@@ -12,6 +12,9 @@ builder.Services.AddSingleton<CheckpointStore>();
 builder.Services.AddSingleton<RelayHub>();
 builder.Services.AddSingleton<RelayServer>();
 builder.Services.AddHostedService(services => services.GetRequiredService<RelayServer>());
+builder.Services.AddSingleton<RelayCaptures>();
+builder.Services.AddSingleton<StandInManager>();
+builder.Services.AddHostedService(services => services.GetRequiredService<StandInManager>());
 builder.Services.AddSignalR(options => options.MaximumReceiveMessageSize = 4096);
 builder.Services.AddRateLimiter(options =>
 {
@@ -21,7 +24,15 @@ builder.Services.AddRateLimiter(options =>
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 var app = builder.Build();
-_ = app.Services.GetRequiredService<LobbyStore>();
+var lobbyStore = app.Services.GetRequiredService<LobbyStore>();
+// Relay clients identify themselves with their lobby token; the server's stand-ins with their own ticket.
+var standInManager = app.Services.GetRequiredService<StandInManager>();
+app.Services.GetRequiredService<RelayHub>().Authenticate = ticket =>
+{
+    if (ticket == standInManager.Ticket) return standInManager.Account;
+    try { var player = lobbyStore.Authenticate("Bearer " + ticket); return new RelayAccount(player.Id, player.DisplayName); }
+    catch (LobbyError) { return null; }
+};
 app.Use(async (context, next) =>
 {
     try { await next(context); }
@@ -64,6 +75,7 @@ app.MapPut("/api/games/{id}/native", async (string id, NativeLaunchReport reques
 }).RequireRateLimiting("writes");
 app.MapCheckpointEndpoints();
 app.MapNativeBranchEndpoints();
+app.MapRelayEndpoints();
 app.Run();
 
 static PlayerInfo Identity(HttpContext context, LobbyStore store) => store.Authenticate(context.Request.Headers.Authorization.ToString());
