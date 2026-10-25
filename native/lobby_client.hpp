@@ -10,7 +10,10 @@
 // already in the game's own character set.
 namespace hp_lobby_client {
 struct OpenGame { std::string id, name, host; bool started = false, password = false; int players = 0, max_players = 0; };
-struct MyGame { std::string id, name, seat, state, date; bool started = false; int turn_seconds = 0; };
+// One player of a game: state is Online, Away or StandIn (the server plays the seat). away_since is
+// Unix seconds, 0 when unknown. Names are raw HotA bytes.
+struct Seat { std::string name, state; long long away_since = 0; };
+struct MyGame { std::string id, name, seat, state, date; bool started = false; int turn_seconds = 0; std::vector<Seat> seats; };
 struct ChatLine { long long id = 0; std::string name, text; };
 
 struct Snapshot {
@@ -34,7 +37,19 @@ void Start(const std::wstring& folder, HWND window);
 // server is used.
 void Open(const std::string& player_name);
 void Close();
+// Keeps the connection up without the window, e.g. during a Heroes Post game for its seat states.
+void Connect(const std::string& player_name);
 Snapshot Get();
+// Replaces the status line under the lobby's title.
+void SetStatus(const std::string& text);
+
+// An authenticated call to this player's server (HeroesPost.ini), with the player's token. Blocking:
+// never from the game thread. `limit` caps the response body.
+struct Reply { int status = 0; std::string body, error; };
+Reply Call(const char* method, const std::string& path, const std::string& body = {}, const wchar_t* type = L"application/json",
+    size_t limit = 1024 * 1024, int timeout_seconds = 30);
+// What went wrong with a call, in the game's character set.
+std::string ProblemText(const Reply& reply);
 void SendChat(const std::string& text);
 void SetTurnLimit(const std::string& game_id, int seconds);
 

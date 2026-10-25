@@ -296,23 +296,161 @@ action on Blue's side. Stopping the server showed "Lost the connection... Reconn
 starting it again brought both clients back. **Turn limit** over the new connection is
 covered by the server test (`RelayLobbyTests`) but was not pressed in the game.
 
+## Playable from the game alone
+
+The patch now does everything the desktop app did for a relay game, and the server keeps games
+through restarts.
+
+### Games survive a server restart
+
+`RelayState` (`src/HeroesLobby.Server/Relay/RelayState.cs`) writes every started game to
+`Relay:StateDirectory`, by default a `relay` folder beside the lobby database. Each game is a
+folder with `session.json` (the session, its seats and groups, accounts, generations, turn limit)
+and one append-only log per seat. The log holds every frame delivered to the seat, every message
+the seat had delivered to others, and the seat's message count. Each record is flushed before the
+frame goes on, so a restarted server can replay anything a client may already have received.
+Unstarted games are not kept. On start the hub loads the saved games with every seat away and the
+host role on the host's seat.
+
+### The game connection survives a dropped connection
+
+When the relay connection drops during a game, the DirectPlay replacement no longer reports a
+lost session. It keeps accepting the engine's messages into an outbox (up to 8192 messages or
+32 MB) and redials every 1 to 10 seconds. It then sends `Resume`: game, seat, seat generation,
+frames received and messages sent. The relay answers with how many of the seat's messages it
+has, replays what the client missed, and the client resends the rest. HotA never sees the gap,
+so a network blip or a server restart costs nothing. A seat's generation rises whenever a new
+process claims it (Continue or a stand-in). An old process that comes back later is refused,
+and only then is its session reported lost. A relay that still believes the old connection is
+open hands the seat over anyway. TCP keep-alive probes every 15 seconds detect dead routes.
+
+### A resumed seat catches up before it is heard
+
+A process that resumes a capture first works through the relay's replay. On the way it re-executes
+part of what the seat already did, so it re-sends messages. Even an End Turn capture taken before a
+day changed makes the resumed engine take part in that day change again, and its world transfer is
+serialised anew, so it never matches the original byte for byte. It also announces itself: the
+current player (`0x3F8`) and simultaneous-turn state (`0x8A2`, `0x8A4`). The other players already
+have the real thing, and the announcements set them back. In testing, a live client switched to
+"current player is BluePlayer" in sequential play. A resumed host that was replayed another
+resumed seat's world transfer failed to load it ("Save file ... was read with errors").
+
+So the relay delivers nothing a claiming process sends until that process reports `CaughtUp`.
+The rejoin reply tells the client how many frames the relay will replay. The DirectPlay
+replacement sends `CaughtUp` before its first message once the engine has consumed all of them,
+plus five seconds. If a process never reports, the relay gives up after three minutes. The other
+players see exactly what they saw before the player left. This replaces delivering every
+re-sent message, which also explains the earlier unexplained warning about 174 of 176 sent
+messages.
+
+### Seat saving in the patch
+
+`native/seat_keeper.cpp` does what the app's `SeatKeeper` did, inside the game:
+
+- it arms the End Turn capture;
+- it captures the turn in progress once each new day, and two seconds after the player stops
+  acting, at most every ten seconds;
+- it zips the capture folder itself (stored entries) and uploads it to
+  `POST /api/relay/games/{id}/captures` with the player's token;
+- it deletes the process's older capture folders.
+
+A capture of a 72x72 map is about 2.5 MB uncompressed.
+
+### Continue
+
+**Continue** in the lobby is enabled for a started game where the player is away or a stand-in
+plays the seat.
+
+1. A worker thread calls `POST /api/relay/games/{id}/resume`. The server claims the seat as
+   `/claim` does, builds the resume image from the latest capture (`NativeResumeImage`, now shared
+   with `NativeHost resume`) and returns one package (`ResumePackage.cs`): the image, the queued
+   messages, the replay start, the sent count, the map and the seat id.
+2. The patch checks that the map is installed. It writes `HeroesPost.resume.bin`,
+   `HeroesPost.deferred.bin` and `HeroesPost.continue.ini`, and restarts HotA with the same command
+   line. `version.dll` in the new process waits for the old one to exit before the game starts.
+3. The new process renames the ini so a failure cannot loop, waits for the main menu, and then:
+   - turns the relay on with `rejoin=`, `seat=` and `seatid=`;
+   - runs the same adapter commands `NativeHost resume` uses;
+   - starts the one-player scaffold under the seat's own name, because HD remembers the
+     scaffold's player name as its multiplayer name;
+   - accepts the scaffold map's own dialogs (intro, day events), whose world is about to be
+     replaced;
+   - waits until the resumed world is verified.
+
+Rejoin now also names the seat by id, because two players may share a name. A failure shows a
+message box and is written to `HeroesPost.keeper.log`.
+
+### Who is in the game
+
+The lobby state now lists every seat of the player's games with its state: Online, Away (since
+when) or StandIn.
+
+- **Lobby.** The row for each game shows how many players are in; hovering it lists them.
+- **Notices.** During a game the patch keeps the lobby connection up. It writes notices to the
+  adventure screen's chat area: a player left (seat kept), came back, or is played by the server;
+  the connection to the server was lost or restored; the turn was saved on the server; welcome
+  back after Continue.
+- **F7** opens a players window. It shows each seat's name and color, whether they are in the
+  game or away and for how long, and whether their turn is ended (from HD's simultaneous-turn
+  rows).
+
+### Leaving
+
+Closing HotA, killing it, or choosing **Main Menu** in System Options all leave the seat away.
+Main Menu sends `DestroyPlayer` and `Close`, which the relay turns into an away seat. No departure
+message reaches the other players, and their game goes on.
+
+### Verification, 2026-10-26
+
+Two patched copies of HotA on one machine against a local server, no desktop app, on the
+72x72 map Air Supremacy:
+
+1. Red (host) created the game from the lobby. Blue joined. Red ticked Simultaneous turns in HD's
+   PvP options and both reached the map. Each patch uploaded a day-1 capture by itself (no app),
+   and an End Turn capture when the day ended.
+2. **Server restart with both players in the game** (earlier run): both clients redialled within
+   six seconds and resumed their seats. The relay had nothing to replay or resend. HotA showed
+   nothing, and the day then advanced normally.
+3. **Host leaves at the start of day 2**, before any day-2 capture: HotA killed while the turn
+   message was still open. Red started HotA again and pressed **Continue**. HotA restarted into the
+   seat, resumed from the day-1 End Turn capture, worked through the day change again, and
+   reported catching up. The relay held back 8 of its messages. Both ended day 2 and reached day 3.
+   Both clients' resources for both players were identical.
+4. **Blue leaves at the start of day 3** and continues the same way. Both reached day 4, identical.
+5. **Both leave at the start of day 4, then the server restarts with nobody connected.** The game
+   was restored from disk. Both pressed Continue at the same moment. Red got the notice "BluePlayer
+   is back in the game". Both reached day 5, identical.
+6. **Main Menu** in System Options during a game: the relay held the seat and Red's game went on.
+7. **F7** opened the players window with both players, their colors, "you" / "in the game", and
+   their turn state. Notices ("Welcome back...", "... is back in the game", "Lost the
+   connection...") showed in the adventure screen's chat area.
+8. Server tests: 44 pass. They include a restart with live clients resuming, a half-open
+   connection taken over, an old process refused by generation, rejoin by seat id, and a resumed
+   seat that is not heard until it catches up. `Native.RelayTest.exe` passes, including a dropped
+   connection with messages sent both ways while it was down. The native unit suites pass.
+
+Broken on the way and fixed: the relay delivered a resumed seat's re-sent day change twice, which
+broke the host on its next Continue; the scaffold renamed the player in HD's settings; two players
+with the same name could not rejoin; and the server lost track of stored captures across a
+restart.
+
 ### Not yet done
 
-- **Continue from the in-game lobby.** The button is there but disabled. Returning to an
-  away seat still needs the desktop app or `NativeHost continue`. The patch would have to
-  claim the seat, download the capture and restart HotA into the resumed seat.
-- Seat saving still runs in the desktop app's seat keeper; the patch does not upload
-  captures yet. Without the app, a stand-in starts from the last capture the server has.
-- Stand-in HotA windows are still visible on the server's desktop.
-- The relay keeps sessions, seats and delivery logs only in memory. Restarting the server
-  ends every running game. Captures survive on disk, but nothing can rejoin them.
-- A player who quits mid-turn loses actions taken since the last capture, at most about
-  20 seconds of play. The relay detects this and logs a warning.
-- Not yet tested: contact between human players (which ends simultaneous turns); more than
-  two humans; large maps; a stand-in's battles against a human.
-- Stand-ins need a Windows server with prepared HotA copies; the Docker image has none.
-  Without stand-ins, an away seat's turn waits for its player.
-- The player's lobby token is stored in plain text in the relay ini inside their own HotA
-  copy.
-- HD's start-up update check once replaced `HD_HOTA.dll` in a test copy. The launcher
-  now sets `<Update.CheckAtStart> = 0` in owned copies.
+- **Simultaneous turns must be ticked by the host** in HD's PvP options (the Create hint says
+  so). Without them seats cannot be saved, and the patch warns in the game. They are not yet
+  switched on automatically for Heroes Post games. Leaving and returning also stops working once
+  simultaneous turns end (their end date, or contact between players).
+- Captures are uploaded uncompressed (2.5 MB on a 72x72 map, at most every ten seconds while
+  acting).
+- A player who quits mid-turn still loses what they did since the last capture (at most about
+  ten seconds plus a pause). The relay now delivers those actions only once, but the resumed
+  world lacks them.
+- Finished or abandoned games are never removed from the relay or its state folder.
+- Stand-ins still run in the server's own HotA copies and their windows are still visible. They
+  are needed for a day to advance while a player is away.
+- Not yet tested: contact between human players; more than two humans; a stand-in's battles
+  against a human; Continue on a map whose file name is not plain ASCII (the scaffold request
+  takes ASCII names only).
+- The player's lobby token is stored in plain text in `HeroesPost.ini` and the continue file.
+- HD's start-up update check once replaced `HD_HOTA.dll` in a test copy. The launcher now sets
+  `<Update.CheckAtStart> = 0` in owned copies.

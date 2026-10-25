@@ -40,69 +40,32 @@ public static partial class NativeBridge
         CaptureBundle.CheckRegularPath(archivePath);
         if (File.ReadAllText(Path.Combine(root, Marker)).Trim() != MarkerContent)
             throw new InvalidOperationException("Resume requires an adapter-owned installation.");
-        NativeCaptureData capture;
-        using (var source = File.OpenRead(archivePath)) capture = NativeCaptureArchive.Read(source, color);
-        using var document = JsonDocument.Parse(capture.ManifestBytes);
-        var manifest = document.RootElement;
-        if (capture.AuditFile is null || !manifest.TryGetProperty("hd_roster", out var roster) ||
-            roster.ValueKind == JsonValueKind.Null)
-            throw new InvalidDataException("This older checkpoint lacks the native world audit and human-seat data required for solo resume.");
         var relayConfig = Path.Combine(root, "HeroesPost.relay.ini");
         var relayRejoin = File.Exists(relayConfig) && File.ReadAllLines(relayConfig, RelayEndpoint.Encoding).Any(l => l.TrimStart().StartsWith("seat=", StringComparison.Ordinal));
-        // Over the relay, the rejoining client re-delivers these to HD's simultaneous-turn queue.
-        if (capture.DeferredCount != 0 && !relayRejoin)
-            throw new InvalidDataException("This checkpoint has pending native events which cannot yet be replayed during solo resume.");
-        var rosterBytes = capture.Files[roster.GetProperty("file").GetString()!];
-        if(!manifest.TryGetProperty("hero_assignments",out var assignmentRecord)||assignmentRecord.ValueKind==JsonValueKind.Null)
-            throw new InvalidDataException("This checkpoint does not contain HotA's simultaneous-turn hero assignments.");
-        var assignments = capture.Files[assignmentRecord.GetProperty("file").GetString()!];
-        var dayOne = manifest.GetProperty("streams").EnumerateArray().Single(s => s.GetProperty("role").GetString()=="baseline_day_one");
-        if(dayOne.GetProperty("status").GetString()!="present"||dayOne.GetProperty("open").GetInt32()!=0||
-            dayOne.GetProperty("length").GetInt64()!=dayOne.GetProperty("captured_bytes").GetInt64())
-            throw new InvalidDataException("The day-one native baseline is not a complete closed stream.");
-        var dayOneBytes=capture.Files[dayOne.GetProperty("file").GetString()!];
-        var st = capture.Files[manifest.GetProperty("raw_st_metadata").GetString()!];
-        if (rosterBytes.Length != 187 || st.Length != 156)
-            throw new InvalidDataException("The native roster or simultaneous-turn metadata has the wrong size.");
-        // The scaffold starts the capture's own scenario; the native loader then checks
-        // geometry and the entire source audit. Older captures predate map_file.
-        var map = manifest.TryGetProperty("map_file", out var mapFile) && mapFile.GetString() is { Length: > 0 } recorded ? recorded : "Judgement Day.h3m";
-        if (map.IndexOfAny(['/', '\\', ':']) >= 0 || !File.Exists(Path.Combine(root, "Maps", map)))
+        NativeResumeImage image;
+        using (var source = File.OpenRead(archivePath)) image = NativeResumeImage.Build(source, color, relayRejoin);
+        var map = image.MapFile;
+        if (!File.Exists(Path.Combine(root, "Maps", map)))
             throw new InvalidOperationException($"This game was played on the map '{map}', which is not installed in {Path.Combine(root, "Maps")}.");
         var target = Path.Combine(root, "HeroesPost.resume.bin");
         if (File.Exists(target)) CaptureBundle.CheckRegularPath(target);
         var temporary = target + ".pending-" + Guid.NewGuid().ToString("N");
         using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-        {
-            using var writer = new BinaryWriter(file, Encoding.UTF8, leaveOpen: true);
-            writer.Write(0x31525048u); // HPR1
-            writer.Write(1u); writer.Write((uint)color); writer.Write((uint)capture.Day);
-            writer.Write((uint)capture.Week); writer.Write((uint)capture.Month);
-            writer.Write(capture.Kind == "completion" ? 1u : 0u);
-            foreach (var bytes in new[] { capture.Files[capture.WorldFile], capture.Files[capture.BaselineFile],
-                         capture.Files[capture.AuditFile], rosterBytes, st, assignments, dayOneBytes })
-            { writer.Write((uint)bytes.Length); writer.Write(bytes); }
-            writer.Flush(); file.Flush(flushToDisk: true);
-        }
+        { file.Write(image.Resume); file.Flush(flushToDisk: true); }
         File.Move(temporary, target, overwrite: true);
         // A relay rejoin first re-delivers the messages HD's queue still held at capture time,
         // then replays the relay's later messages from where the capture's engine stopped.
-        if (relayRejoin && manifest.TryGetProperty("relay_consumed", out var consumed) && consumed.GetInt64() >= 0)
+        if (relayRejoin && image.Consumed >= 0)
         {
             var lines = File.ReadAllLines(relayConfig, RelayEndpoint.Encoding).Where(l => !l.TrimStart().StartsWith("from=", StringComparison.Ordinal) &&
                 !l.TrimStart().StartsWith("sent=", StringComparison.Ordinal) && !l.TrimStart().StartsWith("deferred=", StringComparison.Ordinal)).ToList();
-            lines.Add($"from={consumed.GetInt64()}");
-            if (manifest.TryGetProperty("relay_sent", out var sent) && sent.GetInt64() >= 0) lines.Add($"sent={sent.GetInt64()}");
+            lines.Add($"from={image.Consumed}");
+            if (image.Sent >= 0) lines.Add($"sent={image.Sent}");
             var deferredFile = Path.Combine(root, "HeroesPost.deferred.bin");
             File.Delete(deferredFile);
-            if (capture.DeferredCount != 0)
+            if (image.DeferredCount != 0)
             {
-                using (var output = File.Create(deferredFile))
-                    foreach (var packet in manifest.GetProperty("deferred").GetProperty("packets").EnumerateArray())
-                    {
-                        var bytes = capture.Files[packet.GetProperty("file").GetString()!];
-                        output.Write(BitConverter.GetBytes(bytes.Length)); output.Write(bytes);
-                    }
+                File.WriteAllBytes(deferredFile, image.Deferred);
                 lines.Add("deferred=HeroesPost.deferred.bin");
             }
             File.WriteAllLines(relayConfig, lines, RelayEndpoint.Encoding);

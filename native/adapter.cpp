@@ -12,6 +12,7 @@
 #include "completed_leave.hpp"
 #include "world_resume.hpp"
 #include "resume_session.hpp"
+#include "seat_keeper.hpp"
 #include "solo_transport.hpp"
 #include "dplay_relay.hpp"
 #include "lobby_ui.hpp"
@@ -99,6 +100,8 @@ bool HoldDepartureAtBoundary(void*) noexcept {
     if(resume_session::TryAtAdventureBoundary())return true;
     if(hota_session::IsScaffoldRestorePending())return true;
     if(hota_leave::TryAtAdventureBoundary() || hota_departure::TryHoldAtAdventureBoundary())return true;
+    // The game patch's notices and players window (F7).
+    if(patchMode.load() && hp_lobby::AtAdventureBoundary())return true;
     CaptureCurrentAtBoundary(); return false;
 }
 bool ReadResumeFrames(void*,hota_resume::Frames& frames) noexcept {
@@ -455,7 +458,7 @@ LRESULT CALLBACK InstallOnGameThread(int code, WPARAM wparam, LPARAM lparam) {
                 }
                 if (good && patchMode.load()) {
                     std::string lobbyError;
-                    if (!hp_lobby::Install(&lobbyError)) { std::lock_guard<std::mutex> lock(stateMutex); hookError = lobbyError; }
+                    if (!hp_lobby::Install(hdBase.load(), &lobbyError)) { std::lock_guard<std::mutex> lock(stateMutex); hookError = lobbyError; }
                 }
                 telemetryState.store(good ? 2 : -1);
             } else {
@@ -694,6 +697,7 @@ std::string Command(const std::string& input) {
         return "{\"protocol\":1,\"ok\":true,\"status\":\"armed\",\"durableCheckpointVerified\":false,\"safeLogout\":false,\"resumeSupported\":false}";
     }
     if (command == "experiment_lobby_click") { hp_lobby::RequestClick(); return "{\"protocol\":1,\"ok\":true}"; }
+    if (command == "experiment_players") { hp_lobby::RequestPlayers(); return "{\"protocol\":1,\"ok\":true}"; }
     if (command == "experiment_lobby_create" || command == "experiment_lobby_join") {
         hp_lobby::RequestPress(command == "experiment_lobby_create" ? 0 : 1); return "{\"protocol\":1,\"ok\":true}";
     }
@@ -892,7 +896,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI HeroesPostInitialize(void* mode) {
     }
     hp::Handle writer(CreateThread(nullptr, 0, CaptureWriter, nullptr, 0, nullptr));
     hp::Handle server(CreateThread(nullptr, 0, PipeServer, nullptr, 0, nullptr));
-    if (patchMode.load()) { hp::Handle enable(CreateThread(nullptr, 0, EnableWhenMenuReady, nullptr, 0, nullptr)); }
+    if (patchMode.load()) {
+        hp::Handle enable(CreateThread(nullptr, 0, EnableWhenMenuReady, nullptr, 0, nullptr));
+        // Saves the player's Heroes Post seats and resumes one after Continue restarted HotA.
+        hp_keeper::Start([](const std::string& request) { return Command(request); }, hp::Parent(hp::ModulePath(nullptr)));
+    }
     return writer && server ? 0 : 2;
 }
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void*) {

@@ -15,9 +15,18 @@ public static class RelayProtocol
 
     public const ushort Hello = 1, Enum = 2, Open = 3, CreatePlayer = 4, DestroyPlayer = 5, Send = 6, SetName = 7, SetData = 8,
         SetSession = 9, CreateGroup = 10, DestroyGroup = 11, GroupMember = 12, Chat = 13, Close = 14, GroupInGroup = 15,
-        Rejoin = 16;
+        Rejoin = 16, Resume = 20, CaughtUp = 21;
     public const ushort Reply = 100, Deliver = 101, Created = 102, Destroyed = 103, Name = 104, Data = 105, Session = 106,
         Member = 107, Host = 108, ChatMessage = 109, SessionLost = 110, GroupInGroupChanged = 111;
+
+    // Rejoin: request, session name prefix, seat name, frames consumed, messages sent, seat id (the
+    // last two optional).
+    // Resume: a live client whose connection dropped takes its seat back (request, game, seat, seat
+    // generation, frames received, messages sent). The reply carries the relay's sent count for the
+    // seat; the relay then replays what the client missed. CreatePlayer's reply carries the seat id
+    // and its generation, which rises whenever a new process claims the seat; for a claimed seat
+    // also the number of frames the relay replays to it. CaughtUp (no fields): the claiming
+    // process has worked through the replay, so its messages from here on are new.
 
     // The in-game lobby on its own connection, after Hello. LobbyWatch subscribes; LobbyChat
     // carries UTF-8 text; LobbyTurnLimit is a game id and seconds. The server pushes

@@ -17,6 +17,7 @@ struct Config {
     std::string name;          // diagnostic client label
     std::string rejoin_session; // running game to rejoin (name prefix); empty for a normal client
     std::string rejoin_seat;    // held seat (player name) this client takes over
+    std::uint32_t rejoin_seat_id = 0; // and its relay id, when known (names need not be unique)
     std::uint32_t rejoin_from = 0; // messages the captured seat had consumed; the relay replays the rest
     std::uint32_t rejoin_sent = 0; // messages the captured seat had sent; the relay compares it with its own count
     // Game messages the captured engine had received but HD's simultaneous-turn queue still held
@@ -41,6 +42,13 @@ void Activate(const Config& config);
 void Deactivate();
 // True while new DirectPlay objects go through the relay.
 bool Installed() noexcept;
+// True while a dropped relay connection is being redialled to take the seat back. The engine is
+// not told; its messages queue and are sent once the relay has the seat again.
+bool Reconnecting() noexcept;
+// True while a relay session is open; its instance GUID as text ("xxxxxxxx-xxxx-..."), or empty.
+bool InGame() noexcept;
+std::string CurrentInstance();
+unsigned ReconnectCount() noexcept;
 // True when this client resumes a held seat in a running game (rejoin= and seat=).
 bool Rejoining() noexcept;
 // Messages this rejoining client will re-deliver to HD's simultaneous-turn queue.
@@ -61,4 +69,6 @@ std::string StatusJson();
 // Test seams used by the native relay test without a game process.
 HRESULT CreateDirectPlay(const Config& config, void** out);
 HRESULT CreateLobby(void** out);
+// Cuts a DirectPlay object's relay connection as a network failure would.
+void TestDropConnection(void* directplay);
 }

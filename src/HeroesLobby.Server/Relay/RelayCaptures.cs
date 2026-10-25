@@ -20,7 +20,27 @@ public sealed class RelayCaptures(IConfiguration config, ILogger<RelayCaptures> 
     private readonly ConcurrentDictionary<(Guid, uint), RelayCapture> latest = new();
     private readonly object gate = new();
 
-    public RelayCapture? Latest(Guid game, uint seat) => latest.GetValueOrDefault((game, seat));
+    /// <summary>The seat's newest capture; after a restart, the newest file on disk.</summary>
+    public RelayCapture? Latest(Guid game, uint seat)
+    {
+        if (latest.TryGetValue((game, seat), out var known)) return known;
+        var folder = System.IO.Path.Combine(root, game.ToString("N"), seat.ToString("x8"));
+        if (!Directory.Exists(folder)) return null;
+        foreach (var path in Directory.GetFiles(folder, "*.hpcap").OrderDescending())
+        {
+            try
+            {
+                var capture = Inspect(File.ReadAllBytes(path)) with
+                {
+                    Path = path, Source = System.IO.Path.GetFileNameWithoutExtension(path).Split('-').Last(), Stored = File.GetLastWriteTimeUtc(path)
+                };
+                return latest.GetOrAdd((game, seat), capture);
+            }
+            catch (Exception error) when (error is InvalidDataException or IOException or System.Text.Json.JsonException or KeyNotFoundException)
+            { logger.LogWarning("Stored capture {Path} is unreadable: {Error}", path, error.Message); }
+        }
+        return null;
+    }
 
     /// <summary>Raised after a capture is stored.</summary>
     public event Action? Stored;
@@ -81,7 +101,8 @@ public static class RelayEndpoints
             var state = !g.Started ? "Lobby" : !s.Away ? (s.StandIn ? "StandIn" : "Playing") : "Away";
             return new RelayGameInfo(g.Instance, g.Name, g.Started, s.Name, s.Id, state, g.TurnSeconds ?? defaultTurnSeconds,
                 g.LiveClients, capture?.Kind, capture is null ? null : $"{capture.Month}/{capture.Week}/{capture.Day}",
-                g.Seats.Select(x => x.Name).ToArray());
+                g.Seats.Select(x => x.Name).ToArray(),
+                g.Seats.Select(x => new RelaySeatInfo(x.Name, x.Away ? "Away" : x.StandIn ? "StandIn" : "Online", x.AwaySince)).ToList());
         })).ToList();
 
     public static void MapRelayEndpoints(this WebApplication app)
@@ -124,6 +145,24 @@ public static class RelayEndpoints
             await standIns.Release(id, seat.Id, context.RequestAborted);
             var capture = captures.Latest(id, seat.Id) ?? throw new LobbyError(404, "There is no saved position for your seat yet.");
             return new RelayClaim(id, game.Name, seat.Name, capture.Color, capture.Kind, capture.MapFile);
+        });
+
+        // The in-game Continue: claims the seat like /claim, then serves everything the player's HotA
+        // needs to restart into it, built from the latest capture (see ResumePackage).
+        app.MapPost("/api/relay/games/{id:guid}/resume", async (Guid id, HttpContext context, LobbyStore lobby, RelayHub hub, RelayCaptures captures, StandInManager standIns) =>
+        {
+            var player = Who(context, lobby);
+            var (game, seat) = Mine(hub, id, player);
+            if (!game.Started) throw new LobbyError(409, "This game has not started.");
+            if (!seat.Away && !seat.StandIn) throw new LobbyError(409, "Your HotA is already connected to this game.");
+            await standIns.Release(id, seat.Id, context.RequestAborted);
+            var capture = captures.Latest(id, seat.Id) ?? throw new LobbyError(404, "There is no saved position for your seat yet.");
+            NativeResumeImage image;
+            try { using var file = File.OpenRead(capture.Path); image = NativeResumeImage.Build(file, capture.Color, relayRejoin: true); }
+            catch (InvalidDataException error) { throw new LobbyError(409, "Your saved position cannot be resumed: " + error.Message); }
+            if (image.Consumed < 0) throw new LobbyError(409, "Your saved position predates relay replay and cannot be resumed.");
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Bytes(ResumePackage.Write(game.Name, seat.Name, seat.Id, image), "application/octet-stream");
         });
 
         app.MapGet("/api/relay/games/{id:guid}/capture", (Guid id, HttpContext context, LobbyStore lobby, RelayHub hub, RelayCaptures captures) =>

@@ -55,6 +55,13 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void*) {
     const HMODULE real = LoadLibraryW((std::wstring(system) + L"\\version.dll").c_str());
     if (!real) return FALSE;
     for (int i = 0; i < Count; ++i) ProxyTargets[i] = GetProcAddress(real, Names[i]);
+    // Heroes Post's Continue restarts HotA: this process starts before the old one has ended, so wait
+    // for it here, before the game itself starts, rather than run two games side by side.
+    wchar_t wait[16]{};
+    if (GetEnvironmentVariableW(L"HEROESPOST_WAIT_PID", wait, 16) && wait[0]) {
+        SetEnvironmentVariableW(L"HEROESPOST_WAIT_PID", nullptr);
+        if (const HANDLE old = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(_wtoi(wait)))) { WaitForSingleObject(old, 15000); CloseHandle(old); }
+    }
     if (const HANDLE thread = CreateThread(nullptr, 0, LoadAdapter, nullptr, 0, nullptr)) CloseHandle(thread);
     return TRUE;
 }

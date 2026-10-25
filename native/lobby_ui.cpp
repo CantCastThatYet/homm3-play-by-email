@@ -7,9 +7,11 @@
 #pragma warning(push, 0)
 #include "vendor/H3API.hpp"
 #pragma warning(pop)
+#include "common.hpp"
 #include "lobby_ui.hpp"
 #include "lobby_client.hpp"
 #include "dplay_relay.hpp"
+#include "seat_keeper.hpp"
 #include <algorithm>
 #include <atomic>
 #include <deque>
@@ -145,6 +147,23 @@ std::string NoBraces(std::string s) {
     std::replace(s.begin(), s.end(), '}', ')');
     return s;
 }
+// How long ago a Unix time was, roughly: "5 min", "2 h", "3 days".
+std::string Ago(long long since) {
+    if (since <= 0) return "";
+    FILETIME f{}; GetSystemTimeAsFileTime(&f);
+    const long long now = static_cast<long long>(((static_cast<unsigned long long>(f.dwHighDateTime) << 32) | f.dwLowDateTime) / 10000000ULL) - 11644473600LL;
+    const long long s = now - since;
+    if (s < 90) return "a minute";
+    if (s < 90 * 60) return std::to_string((s + 30) / 60) + " min";
+    if (s < 36 * 3600) return std::to_string((s + 1800) / 3600) + " h";
+    return std::to_string((s + 43200) / 86400) + " days";
+}
+std::string SeatText(const hp_lobby_client::Seat& seat) {
+    if (seat.state == "Online") return "in the game";
+    if (seat.state == "StandIn") return "the server plays this seat";
+    const auto ago = Ago(seat.away_since);
+    return ago.empty() ? "away, seat kept" : "away for " + ago + ", seat kept";
+}
 std::string Duration(int seconds) {
     if (seconds <= 0) return "-";
     if (seconds % 86400 == 0) return std::to_string(seconds / 86400) + (seconds == 86400 ? " day" : " days");
@@ -250,6 +269,8 @@ private:
     const hp_lobby_client::OpenGame* SelectedGame() const { return game >= 0 && game < static_cast<int>(snapshot.games.size()) ? &snapshot.games[game] : nullptr; }
 
     void Refresh(bool force) {
+        // Continue has everything in place: this HotA hands over to one that resumes the seat.
+        if (hp_keeper::ReadyToRestart()) hp_keeper::Restart();
         auto fresh = hp_lobby_client::Get();
         if (!force && fresh.version == shown) return;
         // Keep the selection on the same game when the lists change order.
@@ -282,10 +303,14 @@ private:
             PaintRowBackground(pcx, i, i == mine);
             const char* icon = g.state == "Playing" ? "playin16.pcx" : g.state == "Away" ? "saved16.pcx" : g.state == "StandIn" ? "frend16.pcx" : "new16.pcx";
             PaintIcon(pcx, icon, 10, y + 3);
-            pcx->TextDraw(H3SmallFont::Get(), NoBraces(g.name).c_str(), 32, y, 170, RowH, i == mine ? eTextColor::GOLD : eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
-            std::string what = g.state == "Lobby" ? "setting up" : g.state == "Playing" ? "you are in" : g.state == "Away" ? "away, seat kept" : "server plays your turn";
+            pcx->TextDraw(H3SmallFont::Get(), NoBraces(g.name).c_str(), 32, y, 130, RowH, i == mine ? eTextColor::GOLD : eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+            std::string what = g.state == "Lobby" ? "setting up" : g.state == "Playing" ? "you are in" : g.state == "Away" ? "you are away" : "server plays you";
             if (!g.date.empty()) what = "day " + g.date + ", " + what;
-            pcx->TextDraw(H3SmallFont::Get(), what.c_str(), 200, y, ListW - 212, RowH, eTextColor::GRAY, eTextAlignment::MIDDLE_RIGHT);
+            if (g.started && !g.seats.empty()) {
+                const auto in = std::count_if(g.seats.begin(), g.seats.end(), [](const hp_lobby_client::Seat& s) { return s.state == "Online"; });
+                what += ", " + std::to_string(in) + "/" + std::to_string(g.seats.size()) + " in";
+            }
+            pcx->TextDraw(H3SmallFont::Get(), what.c_str(), 164, y, ListW - 176, RowH, eTextColor::GRAY, eTextAlignment::MIDDLE_RIGHT);
         }
     }
     void PaintGames() {
@@ -329,7 +354,7 @@ private:
         const auto* m = SelectedMine(); const auto* g = SelectedGame();
         buttons[Create].enabled = snapshot.online;
         buttons[Join].enabled = snapshot.online && g && !g->started;
-        buttons[Continue].enabled = false; // resuming an away seat from here comes next
+        buttons[Continue].enabled = snapshot.online && m && m->started && (m->state == "Away" || m->state == "StandIn") && !hp_keeper::Continuing();
         buttons[TurnLimit].enabled = snapshot.online && m;
         buttons[TurnLimit].label = m ? "Turn: " + Duration(m->turn_seconds) : "Turn limit";
         for (int i = 0; i < ButtonCount; ++i) PaintButton(i, false, false);
@@ -388,6 +413,9 @@ private:
                 UpdateButtons();
             }
             return false;
+        case Continue:
+            if (const auto* m = SelectedMine()) { hp_keeper::Continue(m->id); UpdateButtons(); }
+            return false;
         case Close: return true;
         default: return false;
         }
@@ -408,20 +436,142 @@ private:
     }
     std::string Hint(int x, int y) const {
         switch (ButtonAt(x, y)) {
-        case Create: return "Host a new game on the server: HotA's own setup, with the server carrying it.";
+        case Create: return "Host a new game. Tick Simultaneous turns in PvP options: only then can players leave and return.";
         case Join: return SelectedGame() ? "Join the selected game." : "Select a game below to join it.";
-        case Continue: return "Coming next: return to a game you left. Until then the server keeps playing your seat.";
+        case Continue: {
+            const auto* m = SelectedMine();
+            if (hp_keeper::Continuing()) return "Getting your seat from the server...";
+            if (!m) return "Select one of your games to return to it.";
+            if (!m->started) return "This game has not started yet.";
+            if (m->state == "Playing") return "Your HotA is already in this game.";
+            return "Return to the selected game: HotA restarts straight into your seat.";
+        }
         case TurnLimit: return SelectedMine() ? "How long the server waits for a player who left before ending their turn. Click to change."
                                              : "Select one of your games to change its turn limit.";
         case Close: return "Back to the multiplayer menu.";
         default: break;
         }
         int list = -1; const int row = RowAt(x, y, list);
+        if (list == 0 && row >= 0 && row < static_cast<int>(snapshot.mine.size()) && !snapshot.mine[row].seats.empty()) {
+            std::string text;
+            for (const auto& seat : snapshot.mine[row].seats) text += (text.empty() ? "" : "; ") + NoBraces(seat.name) + ": " + SeatText(seat);
+            return text;
+        }
         if (list == 1 && row >= 0 && row < static_cast<int>(snapshot.games.size()))
             return snapshot.games[row].started ? "This game is under way." : "Double-click to join.";
         return "Heroes Post: simultaneous turns, chat, and leave or return at any time.";
     }
 };
+
+// ------------------------------------------------------- players window
+// During a Heroes Post game F7 shows every player: who is in, who left and since when, whose turn
+// is ended. Seat states come from the server; turn states from HD's own simultaneous-turn rows.
+std::uintptr_t hdBase = 0;
+std::atomic<bool> playersRequested{false};
+constexpr UINT PlayersKey = VK_F7;
+const BYTE ColorRgb[8][3] = {{255, 0, 0}, {49, 82, 255}, {156, 115, 82}, {66, 148, 41}, {255, 132, 0}, {140, 41, 165}, {8, 156, 156}, {198, 123, 140}};
+const char* const ColorNames[8] = {"Red", "Blue", "Tan", "Green", "Orange", "Purple", "Teal", "Pink"};
+
+struct PlayerRow { std::string name, state, turn; int color = -1; bool self = false; };
+
+std::vector<PlayerRow> PlayerRows(std::string& note) {
+    std::vector<PlayerRow> rows;
+    unsigned char st[8][6]{}; unsigned simultaneous = 0;
+    const bool phase = hdBase && hp::Read(hdBase + 0x21004a, st) && hp::Read(hdBase + 0x210042, simultaneous);
+    auto colorOf = [](const std::string& name) {
+        for (int c = 0; c < 8; ++c) {
+            const auto* player = reinterpret_cast<const char*>(&P_Main->players[c]);
+            if (!player[0xE2]) continue; // not a human player
+            std::string own(player + 0xCC, strnlen(player + 0xCC, 21));
+            if (_stricmp(own.c_str(), name.c_str()) == 0) return c;
+        }
+        return -1;
+    };
+    const auto snapshot = hp_lobby_client::Get();
+    const auto instance = hp_relay::CurrentInstance();
+    const hp_lobby_client::MyGame* game = nullptr;
+    for (const auto& g : snapshot.mine) if (_stricmp(g.id.c_str(), instance.c_str()) == 0) game = &g;
+    if (!snapshot.online) note = "Not connected to the server: who is in the game is not known right now.";
+    if (game) {
+        for (const auto& seat : game->seats) {
+            PlayerRow row; row.name = seat.name; row.color = colorOf(seat.name); row.self = seat.name == game->seat;
+            row.state = row.self ? "you" : SeatText(seat);
+            rows.push_back(row);
+        }
+    } else {
+        for (int c = 0; c < 8; ++c) {
+            const auto* player = reinterpret_cast<const char*>(&P_Main->players[c]);
+            if (!player[0xE2]) continue;
+            PlayerRow row; row.name.assign(player + 0xCC, strnlen(player + 0xCC, 21)); row.color = c; row.state = "";
+            rows.push_back(row);
+        }
+    }
+    for (auto& row : rows)
+        if (phase && simultaneous == 1 && row.color >= 0 && st[row.color][3]) row.turn = st[row.color][1] ? "turn ended" : "playing";
+    if (phase && simultaneous != 1 && note.empty()) note = "Simultaneous turns are off: players move one after another.";
+    if (hp_relay::Reconnecting()) note = "Reconnecting to the server... Keep playing: your moves are sent when it is back.";
+    return rows;
+}
+
+class PlayersDlg : public H3Dlg {
+public:
+    static constexpr int W = 460, RowH = 24;
+    explicit PlayersDlg(std::vector<PlayerRow> rows, std::string note)
+        : H3Dlg(W, Height(rows.size()), -1, -1, FALSE, FALSE), rows(std::move(rows)), note(std::move(note)) {
+        const int h = Height(this->rows.size());
+        AddBackground(0, 0, W, h, FALSE, FALSE, 0, TRUE);
+        if (auto* back = GetBackgroundPcx()) PaintBlueFrame(back, W, h);
+        CreateText(0, 14, W, 30, "Players", NH3Dlg::Text::BIG, eTextColor::GOLD, 0);
+        const int listH = static_cast<int>(std::max<size_t>(this->rows.size(), 1)) * RowH + 8;
+        if (auto* list = Canvas(this, 24, 50, W - 48, listH, 0)) {
+            auto* pcx = list->GetPcx();
+            TakeBackground(list, GetBackgroundPcx());
+            PaintPanel(pcx, W - 48, listH);
+            if (this->rows.empty()) pcx->TextDraw(H3SmallFont::Get(), "No players known yet.", 0, 0, W - 48, listH, eTextColor::GRAY, eTextAlignment::MIDDLE_CENTER);
+            for (size_t i = 0; i < this->rows.size(); ++i) {
+                const auto& r = this->rows[i]; const int y = 4 + static_cast<int>(i) * RowH;
+                if (r.color >= 0) { pcx->FillRectangle(10, y + 6, 12, 12, ColorRgb[r.color][0], ColorRgb[r.color][1], ColorRgb[r.color][2]); pcx->DrawFrame(10, y + 6, 12, 12); }
+                const std::string name = NoBraces(r.name) + (r.color >= 0 ? std::string(" (") + ColorNames[r.color] + ")" : "");
+                pcx->TextDraw(H3SmallFont::Get(), name.c_str(), 30, y, 170, RowH, r.self ? eTextColor::GOLD : eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+                pcx->TextDraw(H3SmallFont::Get(), r.state.c_str(), 200, y, 150, RowH, r.state == "in the game" || r.self ? eTextColor::REGULAR : eTextColor::GRAY, eTextAlignment::MIDDLE_LEFT);
+                pcx->TextDraw(H3SmallFont::Get(), r.turn.c_str(), 350, y, W - 48 - 360, RowH, eTextColor::GRAY, eTextAlignment::MIDDLE_RIGHT);
+            }
+        }
+        const int noteY = 50 + listH + 6;
+        CreateText(20, noteY, W - 40, 34, (this->note.empty() ? std::string("F7 or Esc closes this window.") : this->note).c_str(),
+            NH3Dlg::Text::SMALL, eTextColor::REGULAR, 0, eTextAlignment::MIDDLE_CENTER);
+    }
+
+protected:
+    BOOL OnKeyPress(eVKey key, eMsgFlag) override {
+        // The F7 that opened the window reaches it too; only a later one closes it.
+        if (key == NH3VKey::H3VK_ESCAPE || key == NH3VKey::H3VK_ENTER || key == NH3VKey::H3VK_F7 && GetTickCount64() - opened > 500) { Stop(); return FALSE; }
+        return TRUE;
+    }
+    BOOL DialogProc(H3Msg& msg) override {
+        if (IsLeftUp(msg)) { Stop(); return FALSE; }
+        return TRUE;
+    }
+
+private:
+    std::vector<PlayerRow> rows;
+    std::string note;
+    ULONGLONG opened = GetTickCount64();
+    static int Height(size_t rows) { return 50 + static_cast<int>(std::max<size_t>(rows, 1)) * RowH + 8 + 6 + 34 + 24; }
+};
+
+// The game thread's message hook: F7 during a Heroes Post game asks for the players window.
+LRESULT CALLBACK KeyHook(int code, WPARAM wparam, LPARAM lparam) {
+    if (code >= 0 && wparam == PM_REMOVE) {
+        auto* m = reinterpret_cast<MSG*>(lparam);
+        if (m->message == WM_KEYDOWN && m->wParam == PlayersKey && hp_relay::InGame()) {
+            DWORD depth = 1;
+            if (hp::Read(0x6aad88, depth) && depth == 0) { playersRequested = true; m->message = WM_NULL; }
+            hp_keeper::Log("F7 at modal depth " + std::to_string(depth));
+        }
+    }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
 
 // ----------------------------------------------------- multiplayer screen
 // Clicks the lobby performs in the multiplayer dialog after it closes, one per engine message.
@@ -547,10 +697,30 @@ INT __fastcall MultiplayerProc(H3BaseDlg* dialog, void*, H3Msg* msg) {
 }
 
 void RequestClick() noexcept { clickRequested.store(true); Wake(); }
+void RequestPlayers() noexcept { playersRequested.store(true); }
+
+bool AtAdventureBoundary() noexcept {
+    try {
+        for (const auto& line : hp_keeper::TakeNotices()) { hp_keeper::Log("Shown: " + line); P_ScreenChat->Show(line.c_str()); }
+        if (playersRequested.exchange(false) && hp_relay::InGame()) {
+            hp_keeper::Log("Players window");
+            std::string note;
+            auto rows = PlayerRows(note);
+            PlayersDlg dialog(std::move(rows), std::move(note));
+            dialog.Start();
+            return true;
+        }
+    } catch (...) {}
+    return false;
+}
 void RequestPress(int button) noexcept { devPress.store(button); Wake(); }
 
-bool Install(std::string* error) {
+bool Install(std::uintptr_t hd_base, std::string* error) {
     if (previous) return true;
+    hdBase = hd_base;
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&KeyHook), &self);
+    if (!SetWindowsHookExW(WH_GETMESSAGE, KeyHook, self, GetCurrentThreadId()) && error) *error = "players_key_hook_failed";
     wchar_t path[MAX_PATH]{}; GetModuleFileNameW(nullptr, path, MAX_PATH);
     std::wstring folder(path); folder = folder.substr(0, folder.find_last_of(L"\\/"));
     hp_lobby_client::Start(folder, GameWindow());

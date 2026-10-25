@@ -23,9 +23,11 @@ public record GameInfo(string Id, string Name, string MapName, int Capacity, str
 
 /// <summary>The game relay and its stand-ins (GET /api/relay).</summary>
 public sealed record RelayServerInfo(int Port, bool StandIns, int DefaultTurnSeconds);
-/// <summary>A relay game in which the player has a seat. State: Lobby, Playing, Away or StandIn.</summary>
+/// <summary>A relay game in which the player has a seat. State: Lobby, Playing, Away or StandIn. Seats: every player in it.</summary>
 public sealed record RelayGameInfo(Guid Id, string Name, bool Started, string Seat, uint SeatId, string State,
-    int TurnSeconds, int LiveClients, string? CaptureKind, string? CaptureDate, string[] Players);
+    int TurnSeconds, int LiveClients, string? CaptureKind, string? CaptureDate, string[] Players, List<RelaySeatInfo>? Seats = null);
+/// <summary>One player of a relay game. State: Online (their HotA is connected), Away (seat kept, since Since) or StandIn (the server plays it).</summary>
+public sealed record RelaySeatInfo(string Name, string State, DateTimeOffset? Since);
 /// <summary>A seat handed back to its player: resume the latest capture and rejoin as this seat.</summary>
 public sealed record RelayClaim(Guid Id, string Session, string Seat, int Color, string Kind, string MapFile);
 public sealed record RelayTurnLimit(int TurnSeconds);

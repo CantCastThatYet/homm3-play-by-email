@@ -126,6 +126,13 @@ BOOL WINAPI OnSession(const DPSESSIONDESC2* d, DWORD*, DWORD flags, void* contex
     if (d && d->name && std::strcmp(d->name, "Relay test") == 0) { f->instance = d->instance; f->found = true; f->flags = d->dwFlags; }
     return TRUE;
 }
+struct Named { const char* name; GUID instance{}; bool found = false; };
+BOOL WINAPI OnNamedSession(const DPSESSIONDESC2* d, DWORD*, DWORD flags, void* context) {
+    if (flags & 1) return FALSE;
+    auto f = static_cast<Named*>(context);
+    if (d && d->name && std::strcmp(d->name, f->name) == 0) { f->instance = d->instance; f->found = true; }
+    return TRUE;
+}
 struct Players { std::vector<std::pair<DPID, DWORD>> list; };
 BOOL WINAPI OnPlayer(DPID id, DWORD, const DPNAME*, DWORD flags, void* context) { static_cast<Players*>(context)->list.push_back({id, flags}); return TRUE; }
 struct AddressSeen { bool sp = false; std::string inet; };
@@ -233,6 +240,39 @@ int main(int argc, char** argv) {
     Check(SUCCEEDED(peer->Close()), "peer closes");
     got = Wait(host); Check(At(got, 0) == 5 && At(got, 8) == peerId, "host receives DPSYS_DESTROYPLAYERORGROUP");
     Check(Wait(host, 300).hr == NoMessages, "no stray messages");
+
+    // A started game survives a dropped connection: the client redials, takes its seat back, and
+    // nothing is lost or repeated in either direction.
+    hp_relay::CreateDirectPlay(config, &raw); auto red = static_cast<IDP4*>(raw);
+    hp_relay::CreateDirectPlay(config, &raw); auto blue = static_cast<IDP4*>(raw);
+    red->InitializeConnection(address.data(), 0); blue->InitializeConnection(address.data(), 0);
+    char resumeName[] = "Reconnect test"; DPSESSIONDESC2 second = desc; second.name = resumeName;
+    Check(SUCCEEDED(red->Open(&second, 2)), "second session created");
+    DPID redId = 0; red->CreatePlayer(&redId, &hn, nullptr, nullptr, 0, 0x100);
+    Named named{"Reconnect test"}; blue->EnumSessions(&filter, 0, OnNamedSession, &named, 0x42);
+    DPSESSIONDESC2 rejoin{}; rejoin.dwSize = sizeof rejoin; rejoin.instance = named.instance;
+    Check(named.found && SUCCEEDED(blue->Open(&rejoin, 1)), "second peer joins");
+    DPID blueId = 0; blue->CreatePlayer(&blueId, &pn, nullptr, nullptr, 0, 0);
+    Wait(red);
+    unsigned char start[0x18]{}; const DWORD loadGame = 0x3E8; std::memcpy(start + 4, &redId, 4); std::memcpy(start + 8, &loadGame, 4);
+    red->Send(redId, 0, 1, start, sizeof start);
+    Check(Wait(blue).data.size() == sizeof start, "the game starts");
+    const unsigned reconnects = hp_relay::ReconnectCount();
+    hp_relay::TestDropConnection(blue);
+    Sleep(300);
+    for (int i = 0; i < 3; ++i) { unsigned char n[8]{'r', 0, 0, 0, static_cast<unsigned char>(i)}; red->Send(redId, blueId, 1, n, 8); }
+    bool accepted = true;
+    for (int i = 0; i < 2; ++i) { unsigned char n[8]{'b', 0, 0, 0, static_cast<unsigned char>(i)}; accepted &= SUCCEEDED(blue->Send(blueId, redId, 1, n, 8)); }
+    Check(accepted, "sends while disconnected are accepted");
+    bool inOrder = true;
+    for (int i = 0; i < 3; ++i) { auto m = Wait(blue, 15000); if (m.data.size() != 8 || m.data[0] != 'r' || m.data[4] != i) inOrder = false; }
+    Check(inOrder, "messages sent to the client while it was away arrive after it reconnects");
+    inOrder = true;
+    for (int i = 0; i < 2; ++i) { auto m = Wait(red, 15000); if (m.data.size() != 8 || m.data[0] != 'b' || m.data[4] != i) inOrder = false; }
+    Check(inOrder, "messages the client sent while away reach the host");
+    Check(hp_relay::ReconnectCount() > reconnects && !hp_relay::Reconnecting(), "the client reconnected by itself");
+    Check(Wait(blue, 500).hr == NoMessages && Wait(red, 500).hr == NoMessages, "no session loss and no duplicates");
+    red->Release(); blue->Release();
 
     peer->Release(); host->Release(); lobby->Release();
     std::printf(failures ? "%d FAILED\n" : "ALL PASSED\n", failures);

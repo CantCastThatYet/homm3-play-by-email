@@ -92,7 +92,8 @@ void WriteTemplate() {
 }
 
 // ---------------------------------------------------------------------- http
-// Only for signing up and finding the relay port; the lobby itself comes over the relay.
+// Signing up, finding the relay port, and bulk transfers (seat captures and Continue); the lobby
+// itself comes over the relay.
 struct Url { std::wstring host, path; INTERNET_PORT port = 0; bool secure = false; };
 bool Crack(const std::string& server, Url& url) {
     const auto wide = Wide(server, CP_UTF8);
@@ -103,23 +104,25 @@ bool Crack(const std::string& server, Url& url) {
     url.host = host; url.path = path; url.port = parts.nPort; url.secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
     return !url.host.empty();
 }
-struct Response { int status = 0; std::string body, error; };
-Response Request(const std::string& server, const char* method, const std::string& path, const std::string& body) {
+using Response = Reply;
+Response Request(const std::string& server, const char* method, const std::string& path, const std::string& body,
+    const std::string& token = {}, const wchar_t* type = L"application/json", size_t limit = 1024 * 1024, int timeout = 5) {
     Response r; Url url;
     if (!Crack(server, url)) { r.error = "the server address is not a valid http:// URL"; return r; }
     HINTERNET session = WinHttpOpen(L"HeroesPost/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) { r.error = "network unavailable"; return r; }
-    WinHttpSetTimeouts(session, 4000, 4000, 5000, 5000);
+    WinHttpSetTimeouts(session, 4000, 4000, timeout * 1000, timeout * 1000);
     HINTERNET connection = WinHttpConnect(session, url.host.c_str(), url.port, 0);
     HINTERNET request = connection ? WinHttpOpenRequest(connection, Wide(method, CP_UTF8).c_str(), Wide(path, CP_UTF8).c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, url.secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
-    const wchar_t* headers = L"Content-Type: application/json\r\n";
-    if (request && WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), const_cast<char*>(body.data()),
+    std::wstring headers = std::wstring(L"Content-Type: ") + type + L"\r\n";
+    if (!token.empty()) headers += L"Authorization: Bearer " + Wide(token, CP_UTF8) + L"\r\n";
+    if (request && WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1), const_cast<char*>(body.data()),
             static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0) && WinHttpReceiveResponse(request, nullptr)) {
         DWORD status = 0, size = sizeof status;
         WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &status, &size, nullptr);
         r.status = static_cast<int>(status);
-        for (DWORD available = 0; WinHttpQueryDataAvailable(request, &available) && available && r.body.size() < 1024 * 1024;) {
+        for (DWORD available = 0; WinHttpQueryDataAvailable(request, &available) && available && r.body.size() < limit;) {
             std::string chunk(available, '\0'); DWORD got = 0;
             if (!WinHttpReadData(request, chunk.data(), available, &got) || !got) break;
             r.body.append(chunk.data(), got);
@@ -240,6 +243,18 @@ bool EnsureIdentity(bool& fresh) {
     return true;
 }
 
+// "2026-10-25T12:34:56.789+00:00" (the server's UTC timestamps) as Unix seconds; 0 if absent.
+long long UnixSeconds(const std::string& iso) {
+    SYSTEMTIME t{};
+    unsigned year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (sscanf_s(iso.c_str(), "%4u-%2u-%2uT%2u:%2u:%2u", &year, &month, &day, &hour, &minute, &second) != 6) return 0;
+    t.wYear = static_cast<WORD>(year); t.wMonth = static_cast<WORD>(month); t.wDay = static_cast<WORD>(day);
+    t.wHour = static_cast<WORD>(hour); t.wMinute = static_cast<WORD>(minute); t.wSecond = static_cast<WORD>(second);
+    FILETIME f{}; if (!SystemTimeToFileTime(&t, &f)) return 0;
+    const auto ticks = (static_cast<unsigned long long>(f.dwHighDateTime) << 32) | f.dwLowDateTime;
+    return static_cast<long long>(ticks / 10000000ULL) - 11644473600LL;
+}
+
 void ApplyState(const hp_json::Value& v) {
     Publish([&](Snapshot& s) {
         s.online = true;
@@ -253,6 +268,11 @@ void ApplyState(const hp_json::Value& v) {
             m.name = m.name.substr(0, m.name.find('\xFA'));
             m.state = g["state"].str(); m.date = g["captureDate"].str(); m.started = g["started"].truthy();
             m.turn_seconds = static_cast<int>(g["turnSeconds"].integer());
+            for (const auto& p : g["seats"].items) {
+                Seat seat; seat.name = BytesText(p["name"].str()); seat.state = p["state"].str();
+                seat.away_since = UnixSeconds(p["since"].str());
+                m.seats.push_back(seat);
+            }
             s.mine.push_back(m);
         }
         s.games.clear();
@@ -398,6 +418,23 @@ void Open(const std::string& player_name) {
     wake.notify_all();
 }
 void Close() { std::lock_guard<std::mutex> lock(mutex); open = false; }
+void Connect(const std::string& player_name) {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!started || wanted) return;
+        if (name.empty()) name = player_name;
+        wanted = true; kick = true;
+    }
+    wake.notify_all();
+}
+void SetStatus(const std::string& text) { Publish([&](Snapshot& s) { s.status = text; }); }
+
+Reply Call(const char* method, const std::string& path, const std::string& body, const wchar_t* type, size_t limit, int timeout_seconds) {
+    const auto ini = ReadSettings();
+    if (ini.server.empty() || ini.token.empty() || ini.token_server != ini.server) { Reply r; r.error = "this HotA has not signed in to its server yet"; return r; }
+    return Request(ini.server, method, path, body, ini.token, type, limit, timeout_seconds);
+}
+std::string ProblemText(const Reply& reply) { return GameText(Problem(reply)); }
 Snapshot Get() { std::lock_guard<std::mutex> lock(mutex); return state; }
 
 void SendChat(const std::string& text) {

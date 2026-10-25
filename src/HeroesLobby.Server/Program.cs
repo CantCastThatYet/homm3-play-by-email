@@ -9,6 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 16 * 1024);
 builder.Services.AddSingleton<LobbyStore>();
 builder.Services.AddSingleton<CheckpointStore>();
+builder.Services.AddSingleton<RelayState>();
 builder.Services.AddSingleton<RelayHub>();
 builder.Services.AddSingleton<RelayServer>();
 builder.Services.AddHostedService(services => services.GetRequiredService<RelayServer>());

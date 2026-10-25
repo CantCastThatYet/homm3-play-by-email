@@ -1,5 +1,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include "dplay_relay.hpp"
 #include <algorithm>
 #include <cstddef>
@@ -83,7 +84,7 @@ typedef BOOL(WINAPI* EnumAddressCallback)(REFGUID, DWORD, const void*, void*);
 enum : std::uint16_t {
     C_HELLO = 1, C_ENUM = 2, C_OPEN = 3, C_CREATE_PLAYER = 4, C_DESTROY_PLAYER = 5, C_SEND = 6,
     C_SET_NAME = 7, C_SET_DATA = 8, C_SET_SESSION = 9, C_CREATE_GROUP = 10, C_DESTROY_GROUP = 11,
-    C_GROUP_MEMBER = 12, C_CHAT = 13, C_CLOSE = 14, C_GROUP_IN_GROUP = 15, C_REJOIN = 16,
+    C_GROUP_MEMBER = 12, C_CHAT = 13, C_CLOSE = 14, C_GROUP_IN_GROUP = 15, C_REJOIN = 16, C_RESUME = 20, C_CAUGHT_UP = 21,
     S_REPLY = 100, S_DELIVER = 101, S_CREATED = 102, S_DESTROYED = 103, S_NAME = 104, S_DATA = 105,
     S_SESSION = 106, S_MEMBER = 107, S_HOST = 108, S_CHAT = 109, S_SESSION_LOST = 110, S_GROUP_IN_GROUP = 111
 };
@@ -210,6 +211,9 @@ std::atomic<std::uint32_t> statSent{0};
 std::atomic<unsigned> statDelivered{0}, statSystem{0}, statObjects{0};
 std::atomic<bool> statConnected{false}, statOpen{false};
 std::atomic<std::uint32_t> statConsumed{0};
+std::atomic<bool> statReconnecting{false};
+std::atomic<unsigned> statReconnects{0};
+std::atomic<std::uint32_t> statGeneration{0};
 std::atomic<bool> holdGameMessages{false};
 std::map<std::uint32_t, std::string> rejoinNames; // guarded by statusMutex
 std::mutex statusMutex;
@@ -241,6 +245,7 @@ public:
         Log("Close");
         if (open) { Writer w(C_CLOSE); w.u32(0); Request(std::move(w)); }
         { std::lock_guard<std::mutex> lock(mutex); open = false; queue.clear(); early.clear(); }
+        if (wake) SetEvent(wake);
         statOpen = false; return DP_OK;
     }
     virtual HRESULT WINAPI CreateGroup(DPID* id, DPNAME* name, void* data, DWORD size, DWORD flags) { return MakeGroup(0, id, name, data, size, flags); }
@@ -252,8 +257,14 @@ public:
         if (FAILED(hr)) { Log("CreatePlayer failed " + Hex(hr)); return hr; }
         Reader r(reply, 0); const DPID created = r.u32();
         if (!r.ok || !created) return DPERR_CANTCREATEPLAYER;
+        // The seat's generation rises each time a new process claims it; older servers send none.
+        // A claimed seat also learns how many frames the relay replays to it.
+        const std::uint32_t claimedGeneration = reply.size() >= 8 ? r.u32() : 0;
+        const std::uint32_t replayed = reply.size() >= 12 ? r.u32() : 0;
         {
             std::lock_guard<std::mutex> lock(mutex);
+            if (!localSeat) { localSeat = created; generation = claimedGeneration; statGeneration = claimedGeneration; }
+            if (!config.rejoin_seat.empty() && reply.size() >= 12) { replayEnd = config.rejoin_from + replayed; caughtUp = false; replayDoneAt = 0; }
             const bool claimed = entities.count(created) != 0;
             auto& e = entities[created]; e.group = false; e.flags = flags | DPPLAYER_LOCAL; e.short_name = Short(name); e.long_name = Long(name);
             e.remote_data.assign(static_cast<std::uint8_t*>(data), static_cast<std::uint8_t*>(data) + (data ? size : 0));
@@ -350,7 +361,10 @@ public:
         // running game instead of creating a new session.
         const bool rejoin = mode == DPOPEN_CREATE && !config.rejoin_seat.empty();
         Writer w(rejoin ? C_REJOIN : C_OPEN); w.u32(0);
-        if (rejoin) w.str(config.rejoin_session).str(config.rejoin_seat).u32(config.rejoin_from).u32(config.rejoin_sent);
+        if (rejoin) {
+            w.str(config.rejoin_session).str(config.rejoin_seat).u32(config.rejoin_from).u32(config.rejoin_sent);
+            if (config.rejoin_seat_id) w.u32(config.rejoin_seat_id);
+        }
         else { w.u32(mode); WriteSession(w, FromDesc(*desc)); }
         std::vector<std::uint8_t> reply; const HRESULT hr = Request(std::move(w), &reply);
         Log(std::string("Open ") + (rejoin ? "rejoin " + config.rejoin_session + " as " + config.rejoin_seat : std::string(mode == DPOPEN_CREATE ? "create " : "join ") + (desc->lpszSessionNameA ? desc->lpszSessionNameA : "")) + " -> " + Hex(hr));
@@ -374,7 +388,14 @@ public:
             session = std::move(s); entities = std::move(snapshot); queue.clear();
             host = mode == DPOPEN_CREATE && !rejoin; open = true;
             statConsumed = rejoin ? config.rejoin_from : 0;
-            statSent = rejoin ? config.rejoin_sent : 0;
+            // The relay replays a rejoined seat's log from the captured count.
+            received = rejoin ? config.rejoin_from : 0;
+            localSeat = 0; generation = 0; abandoned = false;
+            {
+                std::lock_guard<std::mutex> send(sendMutex);
+                statSent = rejoin ? config.rejoin_sent : 0;
+                outbox.clear(); outboxBytes = 0; outboxBase = statSent; seatLive = true;
+            }
             // Events the relay sent after this reply but before this thread woke.
             auto pending = std::move(early); early.clear();
             for (auto& frame : pending) HandleLocked(frame);
@@ -406,7 +427,11 @@ public:
             const HRESULT hr = it->payload.CopyTo(data, size);
             if (hr == DPERR_BUFFERTOOSMALL) return hr;
             *from = it->from; *to = it->to;
-            if (!(flags & DPRECEIVE_PEEK)) { if (it->from != DPID_SYSMSG && !it->injected) ++statConsumed; queue.erase(it); }
+            if (!(flags & DPRECEIVE_PEEK)) {
+                if (it->from != DPID_SYSMSG && !it->injected) ++statConsumed;
+                if (replayEnd && !replayDoneAt && statConsumed >= replayEnd) replayDoneAt = GetTickCount64();
+                queue.erase(it);
+            }
             return hr;
         }
         return DPERR_NOMESSAGES;
@@ -416,8 +441,26 @@ public:
         if (!open) return DPERR_NOCONNECTION;
         { std::lock_guard<std::mutex> lock(mutex); auto it = entities.find(from); if (it == entities.end() || !it->second.local) return DPERR_INVALIDPLAYER; }
         Writer w(C_SEND); w.u32(from).u32(to).u32(flags).blob(data, size);
+        auto frame = w.Finish();
+        // Kept until the relay may have it: after a dropped connection the relay says how many of
+        // this seat's messages it has, and the rest are sent again.
+        bool announce = false;
+        {
+            // A rejoined seat has worked through the relay's replay and what it set off: tell the
+            // relay, which until then takes repeats of the seat's old messages for what they are.
+            std::lock_guard<std::mutex> state(mutex);
+            if (replayEnd && !caughtUp && replayDoneAt && GetTickCount64() - replayDoneAt >= 5000) { caughtUp = true; announce = true; }
+        }
+        std::lock_guard<std::mutex> lock(sendMutex);
+        if (announce) { Writer w2(C_CAUGHT_UP); SendLocked(w2.Finish()); Log("Caught up with the relay's replay"); }
+        outboxBytes += frame.size();
+        outbox.push_back(frame);
+        while (outbox.size() > 1 && (outbox.size() > 8192 || outboxBytes > 32u * 1024 * 1024)) {
+            outboxBytes -= outbox.front().size(); outbox.pop_front(); ++outboxBase;
+        }
         ++statSent;
-        return Post(std::move(w)) ? DP_OK : DPERR_CONNECTIONLOST;
+        if (seatLive) SendLocked(frame);
+        return DP_OK;
     }
     virtual HRESULT WINAPI SetGroupData(DPID id, void* data, DWORD size, DWORD flags) { return SetData(id, true, data, size, flags); }
     virtual HRESULT WINAPI SetGroupName(DPID id, DPNAME* name, DWORD) { return SetName(id, true, name); }
@@ -486,6 +529,7 @@ public:
         } else if (!(flags & DPMESSAGEQUEUE_SEND)) return DPERR_INVALIDPARAMS;
         if (count) *count = n; if (bytes) *bytes = total; return DP_OK;
     }
+    void TestDrop() { std::lock_guard<std::mutex> lock(sendMutex); if (socket_ != INVALID_SOCKET) shutdown(socket_, SD_BOTH); }
     virtual HRESULT WINAPI CancelMessage(DWORD, DWORD) { return DP_OK; }
     virtual HRESULT WINAPI CancelPriority(DWORD, DWORD, DWORD) { return DP_OK; }
 
@@ -504,6 +548,17 @@ private:
     std::deque<Pending> queue;
     DPID seatId = 0; bool deferredDelivered = false;
     std::vector<std::vector<std::uint8_t>> early;
+    // Resuming the seat after the connection drops (guarded by mutex): the local player, its
+    // generation, the frames received for it, the pending Resume request.
+    DPID localSeat = 0; std::uint32_t generation = 0, received = 0, resumeRequest = 0;
+    // A rejoined seat: the consumed count at which the relay's replay ends, and when it was reached.
+    std::uint32_t replayEnd = 0; ULONGLONG replayDoneAt = 0; bool caughtUp = true;
+    bool closing = false, abandoned = false;
+    HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    bool wsa = false;
+    // Sent game messages not yet known to be on the relay (guarded by sendMutex): outbox[i] is
+    // message outboxBase + i. While seatLive is false new messages only queue.
+    std::deque<std::vector<std::uint8_t>> outbox; std::uint32_t outboxBase = 0; size_t outboxBytes = 0; bool seatLive = true;
 
     static std::string Short(const DPNAME* n) { return n && n->lpszShortNameA ? n->lpszShortNameA : ""; }
     static std::string Long(const DPNAME* n) { return n && n->lpszLongNameA ? n->lpszLongNameA : ""; }
@@ -519,35 +574,52 @@ private:
     }
 
     // ---- connection
-    bool Connect() {
-        if (connected) return !lost;
-        WSADATA wsa{}; if (WSAStartup(MAKEWORD(2, 2), &wsa)) return false;
+    SOCKET Dial() {
         addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; hints.ai_protocol = IPPROTO_TCP;
         addrinfo* found = nullptr; const std::string port = std::to_string(config.port);
-        if (getaddrinfo(config.host.c_str(), port.c_str(), &hints, &found) || !found) {
-            SetError("relay_host_unresolved"); WSACleanup(); return false;
-        }
+        if (getaddrinfo(config.host.c_str(), port.c_str(), &hints, &found) || !found) { SetError("relay_host_unresolved"); return INVALID_SOCKET; }
         SOCKET s = ::socket(found->ai_family, found->ai_socktype, found->ai_protocol);
         const bool ok = s != INVALID_SOCKET && ::connect(s, found->ai_addr, static_cast<int>(found->ai_addrlen)) == 0;
         freeaddrinfo(found);
-        if (!ok) { if (s != INVALID_SOCKET) closesocket(s); SetError("relay_unreachable"); WSACleanup(); return false; }
+        if (!ok) { if (s != INVALID_SOCKET) closesocket(s); SetError("relay_unreachable"); return INVALID_SOCKET; }
         BOOL yes = TRUE; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&yes), sizeof yes);
-        socket_ = s; connected = true; lost = false; statConnected = true;
+        // Players wait at the day barrier for a long time without traffic: probe so a dead route is noticed.
+        tcp_keepalive alive{1, 15000, 3000}; DWORD unused = 0;
+        WSAIoctl(s, SIO_KEEPALIVE_VALS, &alive, sizeof alive, nullptr, 0, &unused, nullptr, nullptr);
+        return s;
+    }
+    bool Connect() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (connected && !lost) return true;
+            // While the reader redials for the seat, nothing else may open a connection.
+            if (statReconnecting.load()) return false;
+        }
+        if (reader.joinable()) reader.join();
+        if (!wsa) { WSADATA data{}; if (WSAStartup(MAKEWORD(2, 2), &data)) return false; wsa = true; }
+        const SOCKET s = Dial();
+        if (s == INVALID_SOCKET) return false;
+        { std::lock_guard<std::mutex> lock(sendMutex); socket_ = s; }
+        { std::lock_guard<std::mutex> lock(mutex); connected = true; lost = false; }
+        statConnected = true;
         reader = std::thread([this] { ReadLoop(); });
         Writer hello(C_HELLO); hello.u32(ProtocolVersion).str(config.ticket).str(config.name);
-        Log("Connected to relay " + config.host + ":" + port);
+        Log("Connected to relay " + config.host + ":" + std::to_string(config.port));
         return Post(std::move(hello));
     }
     void Shutdown() {
-        if (socket_ != INVALID_SOCKET) { shutdown(socket_, SD_BOTH); closesocket(socket_); socket_ = INVALID_SOCKET; }
+        { std::lock_guard<std::mutex> lock(mutex); closing = true; }
+        if (wake) SetEvent(wake);
+        { std::lock_guard<std::mutex> lock(sendMutex); if (socket_ != INVALID_SOCKET) shutdown(socket_, SD_BOTH); }
         if (reader.joinable()) reader.join();
-        if (connected) { WSACleanup(); connected = false; }
-        statConnected = false; statOpen = false; --statObjects;
+        { std::lock_guard<std::mutex> lock(sendMutex); if (socket_ != INVALID_SOCKET) { closesocket(socket_); socket_ = INVALID_SOCKET; } }
+        if (wsa) { WSACleanup(); wsa = false; }
+        if (wake) { CloseHandle(wake); wake = nullptr; }
+        connected = false; statConnected = false; statOpen = false; statReconnecting = false; --statObjects;
     }
     static void SetError(const char* text) { std::lock_guard<std::mutex> lock(statusMutex); statusError = text; }
-    bool Post(Writer&& w) {
-        auto frame = w.Finish();
-        std::lock_guard<std::mutex> lock(sendMutex);
+    // Caller holds sendMutex.
+    bool SendLocked(const std::vector<std::uint8_t>& frame) {
         if (socket_ == INVALID_SOCKET) return false;
         size_t done = 0;
         while (done < frame.size()) {
@@ -556,6 +628,11 @@ private:
             done += static_cast<size_t>(n);
         }
         return true;
+    }
+    bool Post(Writer&& w) {
+        auto frame = w.Finish();
+        std::lock_guard<std::mutex> lock(sendMutex);
+        return SendLocked(frame);
     }
     // Requests carry an id in the first u32 after the type.
     HRESULT Request(Writer&& w, std::vector<std::uint8_t>* reply = nullptr) {
@@ -574,7 +651,7 @@ private:
         while (n) { const int got = ::recv(socket_, reinterpret_cast<char*>(p), static_cast<int>(n), 0); if (got <= 0) return false; p += got; n -= static_cast<size_t>(got); }
         return true;
     }
-    void ReadLoop() {
+    void ReadFrames() {
         for (;;) {
             std::uint8_t head[4];
             if (!ReadExact(head, 4)) break;
@@ -584,11 +661,82 @@ private:
             if (!ReadExact(frame.data(), length)) break;
             try { Handle(frame); } catch (...) { Log("relay frame handling failed"); }
         }
-        std::lock_guard<std::mutex> lock(mutex);
-        lost = true; statConnected = false;
-        if (open) Enqueue(System(DPSYS_SESSIONLOST, 4));
-        replies.notify_all();
-        Log("Relay connection closed");
+    }
+    // One thread per connection run: when the connection drops during a game the engine is not
+    // told; this thread redials and asks the relay for the seat back (Resume).
+    void ReadLoop() {
+        for (;;) {
+            ReadFrames();
+            bool resume = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                lost = true; statConnected = false;
+                resume = open && localSeat && !closing && !abandoned;
+                statReconnecting = resume;
+                if (open && !resume && !closing) Enqueue(System(DPSYS_SESSIONLOST, 4));
+                replies.notify_all();
+            }
+            {
+                std::lock_guard<std::mutex> lock(sendMutex);
+                seatLive = false;
+                if (socket_ != INVALID_SOCKET) { closesocket(socket_); socket_ = INVALID_SOCKET; }
+            }
+            Log(resume ? "Relay connection lost; reconnecting to keep the seat" : "Relay connection closed");
+            if (!resume || !Redial()) { statReconnecting = false; return; }
+        }
+    }
+    bool Redial() {
+        statReconnecting = true;
+        DWORD delay = 1000;
+        for (;;) {
+            if (WaitForSingleObject(wake, delay) == WAIT_OBJECT_0) {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (closing || !open) return false;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (closing || !open || abandoned) return false;
+            }
+            const SOCKET s = Dial();
+            if (s == INVALID_SOCKET) { delay = delay * 2 > 10000 ? 10000 : delay * 2; continue; }
+            Writer resume(C_RESUME);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                resumeRequest = nextRequest++;
+                resume.u32(resumeRequest).guid(session.instance).u32(localSeat).u32(generation).u32(received);
+            }
+            {
+                std::lock_guard<std::mutex> lock(sendMutex);
+                socket_ = s;
+                resume.u32(statSent.load());
+                Writer hello(C_HELLO); hello.u32(ProtocolVersion).str(config.ticket).str(config.name);
+                SendLocked(hello.Finish()); SendLocked(resume.Finish());
+            }
+            { std::lock_guard<std::mutex> lock(mutex); lost = false; }
+            statConnected = true; ++statReconnects;
+            Log("Reconnected to relay " + config.host + ":" + std::to_string(config.port) + "; asking for seat " + Hex(localSeat) + " back");
+            return true;
+        }
+    }
+    // The relay's answer to Resume (reader thread, under mutex).
+    void Resumed(HRESULT hr, Reader& r) {
+        resumeRequest = 0; statReconnecting = false;
+        if (FAILED(hr)) {
+            abandoned = true;
+            Log("The relay refused to give the seat back: " + Hex(static_cast<DWORD>(hr)));
+            Enqueue(System(DPSYS_SESSIONLOST, 4));
+            std::lock_guard<std::mutex> lock(sendMutex);
+            if (socket_ != INVALID_SOCKET) shutdown(socket_, SD_BOTH);
+            return;
+        }
+        const std::uint32_t held = r.u32();
+        std::lock_guard<std::mutex> lock(sendMutex);
+        const std::uint32_t end = outboxBase + static_cast<std::uint32_t>(outbox.size());
+        if (held < outboxBase) Log("The relay is missing messages " + std::to_string(held) + ".." + std::to_string(outboxBase) + " of this seat; they are no longer kept");
+        std::uint32_t resent = 0;
+        for (std::uint32_t i = held > outboxBase ? held : outboxBase; i < end; ++i, ++resent) SendLocked(outbox[i - outboxBase]);
+        seatLive = true;
+        Log("Seat " + Hex(localSeat) + " resumed; the relay had " + std::to_string(held) + " of its messages, resent " + std::to_string(resent));
     }
     // ---- inbound
     static Image System(DWORD type, size_t size) { Image i; i.Reserve(size); i.Put32(0, type); return i; }
@@ -615,11 +763,13 @@ private:
         switch (type) {
         case S_REPLY: {
             const auto id = r.u32(); const auto hr = static_cast<HRESULT>(r.u32());
+            if (id && id == resumeRequest) { Resumed(hr, r); return; }
             answered[id] = {hr, std::vector<std::uint8_t>(f.begin() + static_cast<std::ptrdiff_t>(r.i), f.end())};
             replies.notify_all(); return;
         }
         case S_DELIVER: {
             const DPID from = r.u32(), to = r.u32(); auto data = r.blob(); if (!r.ok) return;
+            ++received;
             Image image; image.bytes = std::move(data); Enqueue(std::move(image), from, to); return;
         }
         case S_CREATED: {
@@ -938,6 +1088,7 @@ bool ReadConfig(const std::wstring& path, Config& config, std::string* error) {
         else if (key == "name") c.name = value;
         else if (key == "rejoin") c.rejoin_session = value;
         else if (key == "seat") c.rejoin_seat = value;
+        else if (key == "seatid") { try { c.rejoin_seat_id = static_cast<std::uint32_t>(std::stoul(value, nullptr, 16)); } catch (...) {} }
         else if (key == "from") { try { c.rejoin_from = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
         else if (key == "only") c.only_instance = value;
         else if (key == "sent") { try { c.rejoin_sent = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
@@ -968,6 +1119,7 @@ HRESULT CreateDirectPlay(const Config& config, void** out) {
     if (!out) return E_POINTER;
     try { *out = new DirectPlay(config); return S_OK; } catch (...) { *out = nullptr; return E_OUTOFMEMORY; }
 }
+void TestDropConnection(void* directplay) { if (directplay) static_cast<DirectPlay*>(directplay)->TestDrop(); }
 HRESULT CreateLobby(void** out) {
     if (!out) return E_POINTER;
     try { *out = new Lobby(); return S_OK; } catch (...) { *out = nullptr; return E_OUTOFMEMORY; }
@@ -1002,6 +1154,10 @@ bool Install(const Config& config, std::string* error) {
     return true;
 }
 bool Installed() noexcept { return active.load(); }
+bool Reconnecting() noexcept { return statReconnecting.load(); }
+bool InGame() noexcept { return active.load() && statOpen.load(); }
+std::string CurrentInstance() { if (!InGame()) return {}; std::lock_guard<std::mutex> lock(statusMutex); return statusInstance; }
+unsigned ReconnectCount() noexcept { return statReconnects.load(); }
 std::uint32_t ConsumedCount() noexcept { return statConsumed.load(); }
 std::uint32_t SentCount() noexcept { return statSent.load(); }
 void ReleaseGameMessages() noexcept { holdGameMessages = false; }
@@ -1029,6 +1185,8 @@ std::string StatusJson() {
       << ",\"sessionOpen\":" << (statOpen.load() ? "true" : "false") << ",\"session\":" << hp::Json(session) << ",\"instance\":" << hp::Json(instance) << ",\"seat\":" << seat
       << ",\"rejoinSeat\":" << hp::Json(config.rejoin_seat) << ",\"consumed\":" << statConsumed.load()
       << ",\"sent\":" << statSent.load() << ",\"delivered\":" << statDelivered.load() << ",\"system\":" << statSystem.load()
+      << ",\"reconnecting\":" << (statReconnecting.load() ? "true" : "false") << ",\"reconnects\":" << statReconnects.load()
+      << ",\"generation\":" << statGeneration.load()
       << ",\"error\":" << hp::Json(error) << '}';
     return o.str();
 }
