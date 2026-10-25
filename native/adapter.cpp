@@ -674,6 +674,18 @@ std::string Command(const std::string& input) {
         if(!hota_adventure::QueueEndTurn(request,&error))return hp::Error("action_rejected",error);
         return "{\"protocol\":1,\"ok\":true,\"status\":\"queued\",\"completionVerified\":false}";
     }
+    if (command.rfind("experiment_click_tile_",0)==0) {
+        if (!fingerprintAccepted.load() || telemetryState.load() != 2) return hp::Error("not_ready", "The pinned adapter must be active.");
+        unsigned world=0; int local=-1; unsigned short date[3]{}; int x=-1,y=-1,z=-1;
+        if(sscanf_s(command.c_str()+22,"%d_%d_%d",&x,&y,&z)!=3)return hp::Error("invalid_request","Expected experiment_click_tile_X_Y_Z.");
+        if(!hp::Read(0x699538,world)||!world||!hp::Read(world+0x1f63e,date)||!hp::Read(0x6995a4,local))
+            return hp::Error("not_ready","The native world/owner/date is unreadable.");
+        hota_adventure::Request request;request.token=++bootstrapSequence;request.expected_local=local;
+        request.day=date[0];request.week=date[1];request.month=date[2];request.kind=hota_adventure::Kind::MapPress;
+        request.x=static_cast<std::int16_t>(x);request.y=static_cast<std::int16_t>(y);request.z=static_cast<std::uint8_t>(z);std::string error;
+        if(!hota_adventure::QueueMapPress(request,&error))return hp::Error("action_rejected",error);
+        return "{\"protocol\":1,\"ok\":true,\"status\":\"queued\"}";
+    }
     if (command == "start_session") {
         if (!fingerprintAccepted.load() || telemetryState.load() != 2)
             return hp::Error("not_ready", "Starting requires the pinned active adapter and native scenario setup.");

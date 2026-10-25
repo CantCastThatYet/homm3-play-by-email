@@ -106,8 +106,24 @@ unsigned __stdcall MessageHook(HiHook* chain,std::uint32_t self,Message* message
                 // Exactly the native left-button release event for End Turn.
                 // Replace an idle event in its original storage, so native close
                 // protocol mutations remain visible to the real message pump.
-                const Message action{0x200,0xd,0xc,0,current.x,current.y,0,dialog};SIZE_T written=0;
-                if(!WriteProcessMemory(GetCurrentProcess(),message,&action,sizeof action,&written)||written!=sizeof action) {
+                Message action{0x200,0xd,0xc,0,current.x,current.y,0,dialog};SIZE_T written=0;
+                bool hovered=true;
+                if(request.kind==Kind::MapPress) {
+                    // Hover first, exactly like the cursor: the native mouse-move handler
+                    // (40E2C0) derives the hovered tile (+0xE8), path preview and cursor from
+                    // screen coordinates. Tiles are 32 px from an 8 px map border, origin at
+                    // the packed view position +0xE4 (10-bit signed x, y at bit 16).
+                    std::uint32_t view=0;hovered=hp::Read(self+0xe4,view);
+                    const int vx=static_cast<std::int16_t>(static_cast<std::uint16_t>(view<<6))>>6;
+                    const int vy=static_cast<std::int16_t>(static_cast<std::uint16_t>((view>>16)<<6))>>6;
+                    Message move{4,0,0,0,static_cast<std::uint32_t>(8+(request.x-vx)*32+16),static_cast<std::uint32_t>(8+(request.y-vy)*32+16),0,0};
+                    if(hovered)reinterpret_cast<Native>(chain->GetDefaultFunc())(self,&move);
+                    std::uint32_t tile=0;
+                    const std::uint32_t want=(static_cast<std::uint32_t>(request.x)&0x3ff)|((static_cast<std::uint32_t>(request.y)&0x3ff)<<16)|(static_cast<std::uint32_t>(request.z&0xf)<<26);
+                    hovered=hovered&&hp::Read(self+0xe8,tile)&&tile==want;
+                    action={0x200,0xc,0x25,0,move.x,move.y,0,dialog};
+                }
+                if(!hovered||!WriteProcessMemory(GetCurrentProcess(),message,&action,sizeof action,&written)||written!=sizeof action) {
                     last_error.store(Error::MessageWrite);status.store(Status::Refused);busy.store(false);
                 }else { inside=true;dispatched=true;status.store(Status::Dispatching); }
             }
@@ -165,6 +181,10 @@ bool QueueEndTurn(const Request& value,std::string* error) noexcept {
     if(busy.load()) { lock.clear();ErrorText(error,ErrorName(Error::Busy));return false; }
     request=value;queued_at=GetTickCount64();token.store(value.token);native_result.store(0);last_error.store(Error::None);
     busy.store(true);status.store(Status::Queued);lock.clear();return true;
+}
+bool QueueMapPress(const Request& value,std::string* error) noexcept {
+    if(value.kind!=Kind::MapPress||value.x<0||value.y<0||value.x>255||value.y>255||value.z>1) { ErrorText(error,ErrorName(Error::InvalidRequest));return false; }
+    return QueueEndTurn(value,error);
 }
 bool CancelQueued() noexcept {
     if(lock.test_and_set())return false;

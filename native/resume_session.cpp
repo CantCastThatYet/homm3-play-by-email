@@ -45,7 +45,10 @@ Bundle Decode(const std::vector<std::uint8_t>& bytes,std::uint32_t token){
     if(at!=bytes.size()||b.roster.size()!=187||b.st.size()!=156||b.hero_assignment.size()>4096)throw std::runtime_error("invalid_resume_state_sizes");
     std::string error;if(!hota_resume::DecodeAudit(b.audit,b.source,&error))throw std::runtime_error(error);
     if(b.source.local!=static_cast<int>(b.color)||b.source.current!=static_cast<int>(b.color)||b.source.date!=std::array<std::uint16_t,3>{static_cast<std::uint16_t>(b.day),static_cast<std::uint16_t>(b.week),static_cast<std::uint16_t>(b.month)})throw std::runtime_error("resume_identity_does_not_match_source_audit");
-    if(Field(b,0x120fffe)!=0)throw std::runtime_error("resume_bundle_missing_deferred_packet_payloads");
+    // HD's simultaneous-turn queue is never restored from the bundle (RestoreST starts after it).
+    // Over the relay the rejoining client re-delivers its captured messages, so HD queues them again.
+    if(Field(b,0x120fffe)!=0&&(!hp_relay::Rejoining()||Field(b,0x120fffe)!=hp_relay::RejoinDeferredCount()))
+        throw std::runtime_error("resume_bundle_missing_deferred_packet_payloads");
     if(Field(b,0x1210042)!=1||Field(b,0x1210016)!=b.day+(b.week-1)*7+(b.month-1)*28||Field(b,0x121007e)!=b.hero_assignment.size())throw std::runtime_error("resume_st_date_or_hero_count_mismatch");
     // Running transition flags are not checkpoints. Eligibility8E is persistent,
     // not an active receive-depth indication, so it is preserved rather than tested.
@@ -116,6 +119,15 @@ void RestorePlayerNames(std::uint32_t world) {
         char field[20]{};std::memcpy(field,name.data(),name.size()<19?name.size():19);
         std::memcpy(reinterpret_cast<void*>(world+0x20b9c+c*0x168),field,sizeof field);
     }
+}
+// The scaffold leaves the map view where the single-player start put it, often
+// far from the resumed player's heroes. Select the player's current hero the
+// way its hero-list button does (00409789 -> 00417A80(id,0,0,1)), which also
+// centres the view and rebuilds its movement path map.
+void CenterOnSelectedHero(std::uint32_t adventure,std::uint32_t world) {
+    int local=-1,hero=-1;
+    if(!adventure||!world||!hp::Read(0x6995a4,local)||local<0||local>7||!hp::Read(world+0x20ad0+local*0x168+4,hero)||hero<0)return;
+    reinterpret_cast<void(__thiscall*)(void*,int,int,int,int)>(0x417a80)(reinterpret_cast<void*>(adventure),hero,0,0,1);
 }
 bool Authorize(void* context,std::uint32_t token,const hota_resume::Audit& a) noexcept {
     try{
@@ -198,7 +210,7 @@ bool TryAtAdventureBoundary() noexcept {
         Stage("audit_complete_recovery");
         if(!hota_resume::ReleaseAfterRebind(b.token,expected,Authorize,&b,&error))throw std::runtime_error(error);
         if(!hota_session::ReleaseScaffoldGate(b.token,&error))throw std::runtime_error(error);
-        if(hp_relay::Rejoining()){AttachNetworkHandler(loaded.after.adventure);RestorePlayerNames(loaded.after.world);}
+        if(hp_relay::Rejoining()){AttachNetworkHandler(loaded.after.adventure);RestorePlayerNames(loaded.after.world);CenterOnSelectedHero(loaded.after.adventure,loaded.after.world);}
         // A marker checkpoint precedes EndTurn's tail. Loading its world does
         // not recreate that call stack or prove a native wait-state continuation.
         const bool completed=b.kind==1||b.st[0x50+b.color*6+1]!=0;

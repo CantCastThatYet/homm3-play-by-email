@@ -2,6 +2,7 @@
 #include "common.hpp"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Replacement for the DirectPlay 4 COM objects the engine creates with
 // CoCreateInstance. All session traffic goes through a Heroes Post relay
@@ -17,10 +18,13 @@ struct Config {
     std::string rejoin_session; // running game to rejoin (name prefix); empty for a normal client
     std::string rejoin_seat;    // held seat (player name) this client takes over
     std::uint32_t rejoin_from = 0; // messages the captured seat had consumed; the relay replays the rest
+    // Game messages the captured engine had received but HD's simultaneous-turn queue still held
+    // (deferred= file of u32 length + message). Re-delivered once, first, when game messages are released.
+    std::vector<std::vector<std::uint8_t>> rejoin_deferred;
     std::wstring log_path;     // empty disables logging
 };
 
-// Reads key=value lines (host, port, ticket, name, rejoin, seat). Missing file is not an error:
+// Reads key=value lines (host, port, ticket, name, rejoin, seat, from, deferred). Missing file is not an error:
 // returns false with an empty error so callers keep stock DirectPlay.
 bool ReadConfig(const std::wstring& path, Config& config, std::string* error);
 
@@ -30,6 +34,8 @@ bool Install(const Config& config, std::string* error);
 bool Installed() noexcept;
 // True when this client resumes a held seat in a running game (rejoin= and seat=).
 bool Rejoining() noexcept;
+// Messages this rejoining client will re-deliver to HD's simultaneous-turn queue.
+std::uint32_t RejoinDeferredCount() noexcept;
 // Game messages from the relay the engine has taken with Receive, counted from the
 // start of the session (a rejoin continues the count it resumed from).
 std::uint32_t ConsumedCount() noexcept;

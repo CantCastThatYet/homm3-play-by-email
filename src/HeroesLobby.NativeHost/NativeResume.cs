@@ -47,7 +47,10 @@ public static partial class NativeBridge
         if (capture.AuditFile is null || !manifest.TryGetProperty("hd_roster", out var roster) ||
             roster.ValueKind == JsonValueKind.Null)
             throw new InvalidDataException("This older checkpoint lacks the native world audit and human-seat data required for solo resume.");
-        if (capture.DeferredCount != 0)
+        var relayConfig = Path.Combine(root, "HeroesPost.relay.ini");
+        var relayRejoin = File.Exists(relayConfig) && File.ReadAllLines(relayConfig).Any(l => l.TrimStart().StartsWith("seat=", StringComparison.Ordinal));
+        // Over the relay, the rejoining client re-delivers these to HD's simultaneous-turn queue.
+        if (capture.DeferredCount != 0 && !relayRejoin)
             throw new InvalidDataException("This checkpoint has pending native events which cannot yet be replayed during solo resume.");
         var rosterBytes = capture.Files[roster.GetProperty("file").GetString()!];
         if(!manifest.TryGetProperty("hero_assignments",out var assignmentRecord)||assignmentRecord.ValueKind==JsonValueKind.Null)
@@ -80,13 +83,26 @@ public static partial class NativeBridge
             writer.Flush(); file.Flush(flushToDisk: true);
         }
         File.Move(temporary, target, overwrite: true);
-        // A relay rejoin resumes the seat's message stream where this capture left it.
-        var relayConfig = Path.Combine(root, "HeroesPost.relay.ini");
-        if (File.Exists(relayConfig) && manifest.TryGetProperty("relay_consumed", out var consumed) && consumed.GetInt64() >= 0)
+        // A relay rejoin first re-delivers the messages HD's queue still held at capture time,
+        // then replays the relay's later messages from where the capture's engine stopped.
+        if (relayRejoin && manifest.TryGetProperty("relay_consumed", out var consumed) && consumed.GetInt64() >= 0)
         {
-            var lines = File.ReadAllLines(relayConfig).Where(l => !l.TrimStart().StartsWith("from=", StringComparison.Ordinal)).ToList();
-            if (lines.Any(l => l.TrimStart().StartsWith("seat=", StringComparison.Ordinal)))
-                File.WriteAllLines(relayConfig, [.. lines, $"from={consumed.GetInt64()}"]);
+            var lines = File.ReadAllLines(relayConfig).Where(l => !l.TrimStart().StartsWith("from=", StringComparison.Ordinal) &&
+                !l.TrimStart().StartsWith("deferred=", StringComparison.Ordinal)).ToList();
+            lines.Add($"from={consumed.GetInt64()}");
+            var deferredFile = Path.Combine(root, "HeroesPost.deferred.bin");
+            File.Delete(deferredFile);
+            if (capture.DeferredCount != 0)
+            {
+                using (var output = File.Create(deferredFile))
+                    foreach (var packet in manifest.GetProperty("deferred").GetProperty("packets").EnumerateArray())
+                    {
+                        var bytes = capture.Files[packet.GetProperty("file").GetString()!];
+                        output.Write(BitConverter.GetBytes(bytes.Length)); output.Write(bytes);
+                    }
+                lines.Add("deferred=HeroesPost.deferred.bin");
+            }
+            File.WriteAllLines(relayConfig, lines);
         }
         int pid=0;
         string? launchedIdentity=null;

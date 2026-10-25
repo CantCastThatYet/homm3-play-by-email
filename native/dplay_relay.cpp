@@ -180,7 +180,7 @@ struct Image {
         *size = needed; return DP_OK;
     }
 };
-struct Pending { DPID from = 0, to = 0; Image payload; };
+struct Pending { DPID from = 0, to = 0; Image payload; bool injected = false; };
 
 // ------------------------------------------------------------------ logging
 std::mutex logMutex;
@@ -248,6 +248,7 @@ public:
             e.remote_data.assign(static_cast<std::uint8_t*>(data), static_cast<std::uint8_t*>(data) + (data ? size : 0));
             e.local = true; e.event = event;
             if (!claimed) ++session.current_players;
+            if (!config.rejoin_seat.empty()) seatId = created;
         }
         *id = created; Log("CreatePlayer " + Short(name) + " -> " + Hex(created) + " flags " + Hex(flags)); return DP_OK;
     }
@@ -372,6 +373,18 @@ public:
         if (!from || !to || !size) return DPERR_INVALIDPARAMS;
         std::lock_guard<std::mutex> lock(mutex);
         const bool hold = holdGameMessages.load();
+        if (!hold && !deferredDelivered && seatId) {
+            // Ahead of the relay replay, exactly as the captured engine had already received them.
+            deferredDelivered = true;
+            auto at = queue.begin();
+            for (const auto& message : config.rejoin_deferred) {
+                if (message.size() < 0x14) continue;
+                DPID sender = 0; std::memcpy(&sender, message.data() + 4, 4);
+                Pending p; p.from = sender; p.to = seatId; p.payload.bytes = message; p.injected = true;
+                at = std::next(queue.insert(at, std::move(p)));
+            }
+            if (!config.rejoin_deferred.empty()) Log("Re-delivered " + std::to_string(config.rejoin_deferred.size()) + " deferred messages");
+        }
         for (auto it = queue.begin(); it != queue.end(); ++it) {
             if (hold && it->from != DPID_SYSMSG) continue;
             if ((flags & DPRECEIVE_TOPLAYER) && it->to != *to) continue;
@@ -379,7 +392,7 @@ public:
             const HRESULT hr = it->payload.CopyTo(data, size);
             if (hr == DPERR_BUFFERTOOSMALL) return hr;
             *from = it->from; *to = it->to;
-            if (!(flags & DPRECEIVE_PEEK)) { if (it->from != DPID_SYSMSG) ++statConsumed; queue.erase(it); }
+            if (!(flags & DPRECEIVE_PEEK)) { if (it->from != DPID_SYSMSG && !it->injected) ++statConsumed; queue.erase(it); }
             return hr;
         }
         return DPERR_NOMESSAGES;
@@ -475,6 +488,7 @@ private:
     SessionInfo session;
     std::map<DPID, Entity> entities;
     std::deque<Pending> queue;
+    DPID seatId = 0; bool deferredDelivered = false;
     std::vector<std::vector<std::uint8_t>> early;
 
     static std::string Short(const DPNAME* n) { return n && n->lpszShortNameA ? n->lpszShortNameA : ""; }
@@ -891,6 +905,7 @@ std::string Trim(std::string s) {
 }
 } // namespace
 
+bool ReadDeferred(const std::wstring& path, std::vector<std::vector<std::uint8_t>>& out);
 bool ReadConfig(const std::wstring& path, Config& config, std::string* error) {
     if (error) error->clear();
     hp::Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr));
@@ -909,9 +924,27 @@ bool ReadConfig(const std::wstring& path, Config& config, std::string* error) {
         else if (key == "rejoin") c.rejoin_session = value;
         else if (key == "seat") c.rejoin_seat = value;
         else if (key == "from") { try { c.rejoin_from = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
+        else if (key == "deferred" && !ReadDeferred(hp::Parent(path) + L"\\" + std::wstring(value.begin(), value.end()), c.rejoin_deferred)) {
+            if (error) *error = "relay_deferred_file_invalid"; return false;
+        }
     }
     if (c.host.empty() || !c.port) { if (error) *error = "relay_config_requires_host_and_port"; return false; }
     config = c; return true;
+}
+
+bool ReadDeferred(const std::wstring& path, std::vector<std::vector<std::uint8_t>>& out) {
+    hp::Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr));
+    if (!file) return false;
+    LARGE_INTEGER size{}; if (!GetFileSizeEx(file.value, &size) || size.QuadPart > 16 * 1024 * 1024) return false;
+    std::vector<std::uint8_t> bytes(static_cast<size_t>(size.QuadPart)); DWORD got = 0;
+    if (!bytes.empty() && (!ReadFile(file.value, bytes.data(), static_cast<DWORD>(bytes.size()), &got, nullptr) || got != bytes.size())) return false;
+    for (size_t at = 0; at < bytes.size();) {
+        if (bytes.size() - at < 4) return false;
+        std::uint32_t n = 0; std::memcpy(&n, bytes.data() + at, 4); at += 4;
+        if (n < 0x14 || n > bytes.size() - at || out.size() >= 4096) return false;
+        out.emplace_back(bytes.begin() + static_cast<std::ptrdiff_t>(at), bytes.begin() + static_cast<std::ptrdiff_t>(at + n)); at += n;
+    }
+    return true;
 }
 
 HRESULT CreateDirectPlay(const Config& config, void** out) {
@@ -947,6 +980,7 @@ bool RejoinPlayerName(std::uint32_t id, std::string& name) {
 }
 
 bool Rejoining() noexcept { return installed.load() && !installedConfig.rejoin_seat.empty(); }
+std::uint32_t RejoinDeferredCount() noexcept { return Rejoining() ? static_cast<std::uint32_t>(installedConfig.rejoin_deferred.size()) : 0; }
 
 std::string StatusJson() {
     std::ostringstream o; std::string session, error;

@@ -89,7 +89,7 @@ bool ParseCommand(const std::string& line, std::string& command) {
         if (!take('"')) return false;
         out.clear();
         while (i < line.size() && line[i] != '"') {
-            char c = line[i++]; if (!(c >= 'a' && c <= 'z') && c != '_') return false; out += c;
+            char c = line[i++]; if (!(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '_') return false; out += c;
         }
         return i < line.size() && line[i++] == '"';
     };

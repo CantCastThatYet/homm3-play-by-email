@@ -99,6 +99,25 @@ public class RelayHubTests
     }
 
     [Fact]
+    public void HostSeatCanBeHeldAndReclaimed()
+    {
+        var (hub, red, blue, redId, blueId) = StartedGame();
+        var consumed = (uint)red.Of(RelayProtocol.Deliver).Count();
+        hub.Disconnected(red);
+        Assert.Empty(blue.Of(RelayProtocol.SessionLost));
+        Assert.Empty(blue.Of(RelayProtocol.Host));
+        Send(hub, blue, blueId, redId, Message(GameMessage.Simultaneous, blueId));
+
+        var back = new Peer("red-back");
+        hub.Handle(back, Body(new FrameWriter(RelayProtocol.Rejoin).U32(3).Str("Game").Str("red").U32(consumed)));
+        Assert.Equal(RelayProtocol.Ok, back.ReplyResult(3));
+        Assert.Equal(redId, CreatePlayer(hub, back, 4, RelayProtocol.PlayerServer, "HeroesPost"));
+        Assert.Single(back.Of(RelayProtocol.Deliver));
+        Send(hub, blue, blueId, redId, Message(GameMessage.LoadReceipt, blueId));
+        Assert.Equal(2, back.Of(RelayProtocol.Deliver).Count());
+    }
+
+    [Fact]
     public void RejoinRequiresAHeldSeatAndAPlausibleCount()
     {
         var (hub, _, blue, _, _) = StartedGame();

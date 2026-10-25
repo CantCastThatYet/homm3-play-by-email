@@ -199,6 +199,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
         {
             var seat = claim.Seat;
             if (seat.Owner is not AwaySeat || !session.Entities.ContainsKey(seat.Id)) { Reply(peer, request, RelayProtocol.ErrCantCreatePlayer); return; }
+            if (session.Host == seat.Owner) session.Host = peer;
             seat.Owner = peer;
             Reply(peer, request, RelayProtocol.Ok, w => w.U32(seat.Id));
             logger.LogInformation("Relay seat {Id:x8} '{Name}' in {Session} reclaimed by {Peer}; replaying messages {From}..{Count}", seat.Id, seat.Short, session.Info.Name, peer.Label, claim.From, seat.Delivered.Count);
@@ -343,7 +344,9 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
         if (session.Started)
         {
             foreach (var player in session.Entities.Values.Where(e => e.Owner == peer && !e.Group).ToList()) Hold(session, peer, player);
-            if (session.Host == peer && session.Entities.Values.FirstOrDefault(e => e.Owner is AwaySeat) is { } away) session.Host = away.Owner;
+            // The host role stays with the host's seat (the server player) until someone reclaims it.
+            if (session.Host == peer && (session.Entities.GetValueOrDefault(RelayProtocol.ServerPlayerId) ?? session.Entities.Values.FirstOrDefault(e => e.Owner is AwaySeat)) is { Owner: AwaySeat } away)
+                session.Host = away.Owner;
             logger.LogInformation("Relay client {Peer} left started session {Name}; {Live} live clients remain", peer.Label, session.Info.Name, session.Peers.Count);
             return;
         }
