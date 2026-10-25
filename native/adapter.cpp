@@ -14,6 +14,7 @@
 #include "resume_session.hpp"
 #include "solo_transport.hpp"
 #include "dplay_relay.hpp"
+#include "lobby_ui.hpp"
 #include "vendor/patcher_x86.hpp"
 #include <psapi.h>
 #include <sddl.h>
@@ -33,6 +34,8 @@ namespace {
 HMODULE moduleHandle = nullptr;
 std::atomic<bool> started{false}, fingerprintAccepted{false}, captureRequested{false};
 std::atomic<bool> completionCaptureRequested{false};
+// Loaded by the version.dll proxy in the player's installation rather than injected into an owned copy.
+std::atomic<bool> patchMode{false};
 std::atomic<bool> completionSnapshotRequested{false};
 std::atomic<unsigned> completionMarkers{0};
 std::atomic<unsigned> bootstrapSequence{0};
@@ -265,7 +268,12 @@ void CheckBuild() {
         if (r == 1 && match) hdBase.store(reinterpret_cast<std::uintptr_t>(found));
     }
     out << ']';
-    // An isolated-copy marker is also required for in-process hooks.
+    // A launcher-owned copy carries a marker; the game patch runs in the player's own installation.
+    if (patchMode.load()) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        fingerprintJson = out.str(); fingerprintReason = accepted ? "accepted" : reason;
+        fingerprintAccepted.store(accepted); return;
+    }
     hp::Handle marker(CreateFileW((root + L"\\.heroespost-owned-copy").c_str(), GENERIC_READ, FILE_SHARE_READ,
                                   nullptr, OPEN_EXISTING, 0, nullptr));
     char markerText[64]{}; DWORD count = 0;
@@ -444,6 +452,10 @@ LRESULT CALLBACK InstallOnGameThread(int code, WPARAM wparam, LPARAM lparam) {
                     hota_completion::Uninstall();
                     for (auto hook : hooks) if (hook) hook->Destroy();
                     std::lock_guard<std::mutex> lock(stateMutex); hookError = completionError.empty() ? "patcher_hook_install_failed" : completionError;
+                }
+                if (good && patchMode.load()) {
+                    std::string lobbyError;
+                    if (!hp_lobby::Install(&lobbyError)) { std::lock_guard<std::mutex> lock(stateMutex); hookError = lobbyError; }
                 }
                 telemetryState.store(good ? 2 : -1);
             } else {
@@ -681,6 +693,7 @@ std::string Command(const std::string& input) {
         if(!hota_departure::Arm(request,&error))return hp::Error("departure_rejected",error);
         return "{\"protocol\":1,\"ok\":true,\"status\":\"armed\",\"durableCheckpointVerified\":false,\"safeLogout\":false,\"resumeSupported\":false}";
     }
+    if (command == "experiment_lobby_click") { hp_lobby::RequestClick(); return "{\"protocol\":1,\"ok\":true}"; }
     if (command == "experiment_end_turn") {
         if (!fingerprintAccepted.load() || telemetryState.load() != 2) return hp::Error("not_ready", "The pinned adapter must be active.");
         unsigned world=0; int local=-1; unsigned short date[3]{};
@@ -841,8 +854,20 @@ DWORD WINAPI PipeServer(void*) {
 }
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI HeroesPostInitialize(void*) {
+// The patch has no launcher to enable the hooks: wait for the native main menu, then do it here.
+DWORD WINAPI EnableWhenMenuReady(void*) {
+    for (int attempt = 0; attempt < 1200; ++attempt) {
+        Sleep(250);
+        const auto state = telemetryState.load();
+        if (state == 2 || state == -1) return 0;
+        if (state == 0) EnableTelemetry();
+    }
+    return 1;
+}
+
+extern "C" __declspec(dllexport) DWORD WINAPI HeroesPostInitialize(void* mode) {
     if (started.exchange(true)) return 0;
+    patchMode.store(mode == reinterpret_cast<void*>(1));
     // Called explicitly after LoadLibrary has completed, never under DllMain.
     captureRoot = hp::Parent(hp::ModulePath(moduleHandle)) + L"\\captures\\" + std::to_wstring(GetCurrentProcessId())
         + L"-" + std::to_wstring(hp::CreationTime(GetCurrentProcess()));
@@ -861,6 +886,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI HeroesPostInitialize(void*) {
     }
     hp::Handle writer(CreateThread(nullptr, 0, CaptureWriter, nullptr, 0, nullptr));
     hp::Handle server(CreateThread(nullptr, 0, PipeServer, nullptr, 0, nullptr));
+    if (patchMode.load()) { hp::Handle enable(CreateThread(nullptr, 0, EnableWhenMenuReady, nullptr, 0, nullptr)); }
     return writer && server ? 0 : 2;
 }
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void*) {

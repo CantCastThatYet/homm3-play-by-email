@@ -9,7 +9,7 @@ New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $testBuild = Join-Path $outputRoot 'build-native-tests.cmd'
 $script = @"
 @echo off
-call "$VcVarsPath" >nul
+call "$VcVarsPath" >nul 2>&1
 if errorlevel 1 exit /b 1
 cd /d "$outputRoot"
 cl /nologo /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0601 /I"$nativeRoot" "$nativeRoot\capture_test.cpp" "$nativeRoot\capture.cpp" /Fe:Native.CaptureTest.exe /link /DYNAMICBASE /NXCOMPAT
