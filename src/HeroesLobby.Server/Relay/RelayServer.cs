@@ -5,8 +5,8 @@ using System.Threading.Channels;
 
 namespace HeroesLobby.Server.Relay;
 
-/// <summary>TCP endpoint for game clients' replacement DirectPlay transport (Relay:Port, 0 disables).</summary>
-public sealed class RelayServer(RelayHub hub, IConfiguration config, ILogger<RelayServer> logger) : BackgroundService
+/// <summary>TCP endpoint for game clients' replacement DirectPlay transport and the in-game lobby (Relay:Port, 0 picks a free port, -1 disables).</summary>
+public sealed class RelayServer(RelayHub hub, RelayLobbyFeed lobby, IConfiguration config, ILogger<RelayServer> logger) : BackgroundService
 {
     public int Port { get; private set; }
     private readonly TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -60,13 +60,15 @@ public sealed class RelayServer(RelayHub hub, IConfiguration config, ILogger<Rel
                 if (length < 2 || length > RelayProtocol.MaxFrame) break;
                 var frame = new byte[length];
                 await stream.ReadExactlyAsync(frame, stopping);
-                hub.Handle(peer, frame);
+                if (RelayLobbyFeed.Handles(BinaryPrimitives.ReadUInt16LittleEndian(frame))) lobby.Handle(peer, frame);
+                else hub.Handle(peer, frame);
             }
         }
         catch (Exception error) when (error is IOException or EndOfStreamException or OperationCanceledException or ObjectDisposedException) { }
         catch (Exception error) { logger.LogError(error, "Relay client {Peer} failed", peer.Label); }
         finally
         {
+            lobby.Disconnected(peer);
             hub.Disconnected(peer);
             peer.Outbox.Writer.TryComplete();
             await writer;

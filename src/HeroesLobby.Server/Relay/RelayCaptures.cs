@@ -22,6 +22,9 @@ public sealed class RelayCaptures(IConfiguration config, ILogger<RelayCaptures> 
 
     public RelayCapture? Latest(Guid game, uint seat) => latest.GetValueOrDefault((game, seat));
 
+    /// <summary>Raised after a capture is stored.</summary>
+    public event Action? Stored;
+
     /// <summary>Validates and stores a capture bundle. Refuses one older than the seat's latest.</summary>
     public RelayCapture Store(Guid game, uint seat, byte[] bundle, string source)
     {
@@ -42,6 +45,7 @@ public sealed class RelayCaptures(IConfiguration config, ILogger<RelayCaptures> 
                 try { File.Delete(old); } catch (IOException) { }
             logger.LogInformation("Stored {Kind} capture of seat {Seat:x8} in {Game} from {Source}: day {Month}/{Week}/{Day}, relay {Consumed} in / {Sent} out",
                 capture.Kind, seat, game, source, capture.Month, capture.Week, capture.Day, capture.Consumed, capture.Sent);
+            Stored?.Invoke();
             return capture;
         }
     }
@@ -70,12 +74,12 @@ public sealed class RelayCaptures(IConfiguration config, ILogger<RelayCaptures> 
 public static class RelayEndpoints
 {
     /// <summary>The relay games in which the player holds a seat.</summary>
-    public static List<RelayGameInfo> MyGames(PlayerInfo player, RelayHub hub, RelayCaptures captures, StandInManager standIns) =>
-        hub.Games().SelectMany(g => g.Seats.Where(s => s.Account == player.Id).Select(s =>
+    public static List<RelayGameInfo> MyGames(string account, IEnumerable<RelayGameView> games, RelayCaptures captures, int defaultTurnSeconds) =>
+        games.SelectMany(g => g.Seats.Where(s => s.Account == account).Select(s =>
         {
             var capture = captures.Latest(g.Instance, s.Id);
             var state = !g.Started ? "Lobby" : !s.Away ? (s.StandIn ? "StandIn" : "Playing") : "Away";
-            return new RelayGameInfo(g.Instance, g.Name, g.Started, s.Name, s.Id, state, g.TurnSeconds ?? standIns.DefaultTurnSeconds,
+            return new RelayGameInfo(g.Instance, g.Name, g.Started, s.Name, s.Id, state, g.TurnSeconds ?? defaultTurnSeconds,
                 g.LiveClients, capture?.Kind, capture is null ? null : $"{capture.Month}/{capture.Week}/{capture.Day}",
                 g.Seats.Select(x => x.Name).ToArray());
         })).ToList();
@@ -94,7 +98,7 @@ public static class RelayEndpoints
             new RelayServerInfo(relay.Port, standIns.Enabled, standIns.DefaultTurnSeconds));
 
         app.MapGet("/api/relay/games", (HttpContext context, LobbyStore lobby, RelayHub hub, RelayCaptures captures, StandInManager standIns) =>
-            MyGames(Who(context, lobby), hub, captures, standIns));
+            MyGames(Who(context, lobby).Id, hub.Games(), captures, standIns.DefaultTurnSeconds));
 
         app.MapPost("/api/relay/games/{id:guid}/captures", async (Guid id, HttpContext context, LobbyStore lobby, RelayHub hub, RelayCaptures captures) =>
         {

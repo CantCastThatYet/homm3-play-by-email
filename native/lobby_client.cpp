@@ -1,24 +1,30 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <mstcpip.h>
 #include "lobby_client.hpp"
 #include "json_lite.hpp"
 #include <winhttp.h>
+#include <atomic>
 #include <condition_variable>
-#include <deque>
+#include <cstdint>
 #include <fstream>
 #include <cstdio>
 #include <functional>
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <vector>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "ole32.lib")
 
 namespace hp_lobby_client {
 namespace {
 std::mutex mutex;
 std::condition_variable wake;
 Snapshot state;                 // guarded by mutex
-bool started = false, open = false;
+bool started = false, open = false, wanted = false, kick = false;
 std::string name;               // the name to register with, game charset
-std::deque<std::function<void()>> actions;
 std::wstring iniPath;
 HWND notifyWindow = nullptr;
 
@@ -86,6 +92,7 @@ void WriteTemplate() {
 }
 
 // ---------------------------------------------------------------------- http
+// Only for signing up and finding the relay port; the lobby itself comes over the relay.
 struct Url { std::wstring host, path; INTERNET_PORT port = 0; bool secure = false; };
 bool Crack(const std::string& server, Url& url) {
     const auto wide = Wide(server, CP_UTF8);
@@ -97,7 +104,7 @@ bool Crack(const std::string& server, Url& url) {
     return !url.host.empty();
 }
 struct Response { int status = 0; std::string body, error; };
-Response Request(const std::string& server, const char* method, const std::string& path, const std::string& token, const std::string& body) {
+Response Request(const std::string& server, const char* method, const std::string& path, const std::string& body) {
     Response r; Url url;
     if (!Crack(server, url)) { r.error = "the server address is not a valid http:// URL"; return r; }
     HINTERNET session = WinHttpOpen(L"HeroesPost/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -106,9 +113,8 @@ Response Request(const std::string& server, const char* method, const std::strin
     HINTERNET connection = WinHttpConnect(session, url.host.c_str(), url.port, 0);
     HINTERNET request = connection ? WinHttpOpenRequest(connection, Wide(method, CP_UTF8).c_str(), Wide(path, CP_UTF8).c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, url.secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
-    std::wstring headers = L"Content-Type: application/json\r\n";
-    if (!token.empty()) headers += L"Authorization: Bearer " + Wide(token, CP_UTF8) + L"\r\n";
-    if (request && WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1), const_cast<char*>(body.data()),
+    const wchar_t* headers = L"Content-Type: application/json\r\n";
+    if (request && WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), const_cast<char*>(body.data()),
             static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0) && WinHttpReceiveResponse(request, nullptr)) {
         DWORD status = 0, size = sizeof status;
         WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &status, &size, nullptr);
@@ -132,9 +138,79 @@ std::string Problem(const Response& r) {
     return "the server answered " + std::to_string(r.status);
 }
 
+// ------------------------------------------------------------- relay frames
+// The relay's framing (RelayProtocol.cs): u32 length of the rest, u16 type, little-endian fields.
+constexpr std::uint32_t ProtocolVersion = 1;
+constexpr std::uint16_t C_HELLO = 1, C_LOBBY_WATCH = 17, C_LOBBY_CHAT = 18, C_LOBBY_TURN_LIMIT = 19;
+constexpr std::uint16_t S_LOBBY_STATE = 112, S_LOBBY_CHAT = 113, S_LOBBY_NOTICE = 114;
+constexpr std::uint32_t NOTICE_SIGN_IN = 1;
+constexpr std::uint32_t MaxFrame = 4 * 1024 * 1024;
+
+struct Frame {
+    std::vector<std::uint8_t> b;
+    explicit Frame(std::uint16_t type) : b(6, 0) { b[4] = static_cast<std::uint8_t>(type); b[5] = static_cast<std::uint8_t>(type >> 8); }
+    Frame& u32(std::uint32_t v) { for (int i = 0; i < 4; ++i) b.push_back(static_cast<std::uint8_t>(v >> (8 * i))); return *this; }
+    Frame& bytes(const void* p, size_t n) { const auto* c = static_cast<const std::uint8_t*>(p); b.insert(b.end(), c, c + n); return *this; }
+    Frame& blob(const std::string& s) { u32(static_cast<std::uint32_t>(s.size())); return bytes(s.data(), s.size()); }
+    std::vector<std::uint8_t> Finish() {
+        const auto n = static_cast<std::uint32_t>(b.size() - 4);
+        for (int i = 0; i < 4; ++i) b[i] = static_cast<std::uint8_t>(n >> (8 * i));
+        return std::move(b);
+    }
+};
+struct Reader {
+    const std::vector<std::uint8_t>& f; size_t at; bool ok = true;
+    std::uint32_t u32() {
+        if (f.size() - at < 4) { ok = false; return 0; }
+        std::uint32_t v = 0; for (int i = 0; i < 4; ++i) v |= static_cast<std::uint32_t>(f[at + i]) << (8 * i);
+        at += 4; return v;
+    }
+    std::string blob() {
+        const auto n = u32();
+        if (!ok || f.size() - at < n) { ok = false; return {}; }
+        std::string s(reinterpret_cast<const char*>(f.data() + at), n); at += n; return s;
+    }
+};
+
+// The connection is the worker's; other threads only send on it or shut it down.
+std::mutex sendMutex;
+SOCKET relay = INVALID_SOCKET;  // guarded by sendMutex
+
+bool Post(Frame& frame) {
+    const auto bytes = frame.Finish();
+    std::lock_guard<std::mutex> lock(sendMutex);
+    if (relay == INVALID_SOCKET) return false;
+    for (size_t done = 0; done < bytes.size();) {
+        const int n = ::send(relay, reinterpret_cast<const char*>(bytes.data() + done), static_cast<int>(bytes.size() - done), 0);
+        if (n <= 0) return false;
+        done += static_cast<size_t>(n);
+    }
+    return true;
+}
+void Drop() { std::lock_guard<std::mutex> lock(sendMutex); if (relay != INVALID_SOCKET) shutdown(relay, SD_BOTH); }
+bool ReadExact(SOCKET s, std::uint8_t* p, size_t n) {
+    while (n) { const int got = ::recv(s, reinterpret_cast<char*>(p), static_cast<int>(n), 0); if (got <= 0) return false; p += got; n -= static_cast<size_t>(got); }
+    return true;
+}
+SOCKET Dial(const std::string& host, int port, std::string& error) {
+    addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; hints.ai_protocol = IPPROTO_TCP;
+    addrinfo* found = nullptr;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &found) || !found) { error = "cannot find " + host; return INVALID_SOCKET; }
+    SOCKET s = ::socket(found->ai_family, found->ai_socktype, found->ai_protocol);
+    const bool ok = s != INVALID_SOCKET && ::connect(s, found->ai_addr, static_cast<int>(found->ai_addrlen)) == 0;
+    freeaddrinfo(found);
+    if (!ok) { if (s != INVALID_SOCKET) closesocket(s); error = "cannot reach the game relay on port " + std::to_string(port); return INVALID_SOCKET; }
+    BOOL yes = TRUE; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&yes), sizeof yes);
+    // The lobby can stay quiet for hours; probe so a dead route is noticed and redialled.
+    tcp_keepalive alive{1, 30000, 5000}; DWORD unused = 0;
+    WSAIoctl(s, SIO_KEEPALIVE_VALS, &alive, sizeof alive, nullptr, 0, &unused, nullptr, nullptr);
+    return s;
+}
+
 // --------------------------------------------------------------- the worker
 void Notify() {
     if (!notifyWindow) return;
+    { std::lock_guard<std::mutex> lock(mutex); if (!open) return; }
     POINT p{}; GetCursorPos(&p); ScreenToClient(notifyWindow, &p);
     PostMessageW(notifyWindow, WM_MOUSEMOVE, 0, MAKELPARAM(p.x, p.y));
 }
@@ -142,57 +218,33 @@ void Publish(const std::function<void(Snapshot&)>& change) {
     { std::lock_guard<std::mutex> lock(mutex); change(state); ++state.version; }
     Notify();
 }
+void Offline(const std::string& status) { Publish([&](Snapshot& s) { s.online = false; s.status = status; }); }
 
-Settings settings;
-long long lastChat = 0;
-std::string lastBody;
+Settings settings;              // the worker's copy
 
-bool EnsureIdentity() {
+// True when settings.token is usable; `fresh` reports a token made just now.
+bool EnsureIdentity(bool& fresh) {
+    fresh = false;
     if (!settings.token.empty() && settings.token_server == settings.server) return true;
     std::string player; { std::lock_guard<std::mutex> lock(mutex); player = name; }
     if (player.empty()) player = "Player";
-    const auto r = Request(settings.server, "POST", "/api/players", "", "{\"displayName\":" + JsonString(Utf8Text(player)) + "}");
+    const auto r = Request(settings.server, "POST", "/api/players", "{\"displayName\":" + JsonString(Utf8Text(player)) + "}");
     hp_json::Value v;
     if (r.status != 200 || !hp_json::Parse(r.body, v) || v["token"].str().empty()) {
-        const auto why = GameText(Problem(r));
-        Publish([&](Snapshot& s) { s.online = false; s.status = "Cannot sign in to " + settings.server + ": " + why; });
+        Offline("Cannot sign in to " + settings.server + ": " + GameText(Problem(r)));
         return false;
     }
     settings.token = v["token"].str(); settings.token_server = settings.server;
     SaveIdentity(settings.token, settings.server);
+    fresh = true;
     return true;
 }
 
-void Poll() {
-    if (settings.server.empty()) {
-        Publish([](Snapshot& s) { s.online = false; s.status = "No server set: put server=http://host:port in HeroesPost.ini in the HotA folder."; });
-        return;
-    }
-    if (!EnsureIdentity()) return;
-    auto r = Request(settings.server, "GET", "/api/relay/lobby?after=" + std::to_string(lastChat), settings.token, "");
-    if (r.status == 401) {
-        // The server no longer knows this identity (a new database): make a new one once.
-        settings.token.clear();
-        if (!EnsureIdentity()) return;
-        r = Request(settings.server, "GET", "/api/relay/lobby?after=" + std::to_string(lastChat), settings.token, "");
-    }
-    hp_json::Value v;
-    if (r.status != 200 || !hp_json::Parse(r.body, v)) {
-        const auto why = GameText(Problem(r));
-        bool changed = false;
-        { std::lock_guard<std::mutex> lock(mutex); changed = state.online || state.status.find(why) == std::string::npos; }
-        if (changed) Publish([&](Snapshot& s) { s.online = false; s.status = "Cannot reach " + settings.server + ": " + why; });
-        lastBody.clear();
-        return;
-    }
-    if (r.body == lastBody) return;
-    lastBody = r.body;
-    Url url; Crack(settings.server, url);
+void ApplyState(const hp_json::Value& v) {
     Publish([&](Snapshot& s) {
-        s.online = true; s.server = settings.server; s.ticket = settings.token;
+        s.online = true;
         s.player = GameText(v["player"].str());
         s.status = "Connected to " + settings.server + " as {" + s.player + "}";
-        s.relay_host = Narrow(url.host, CP_UTF8); s.relay_port = static_cast<int>(v["relayPort"].integer());
         s.default_turn_seconds = static_cast<int>(v["defaultTurnSeconds"].integer());
         s.mine.clear();
         for (const auto& g : v["mine"].items) {
@@ -210,36 +262,106 @@ void Poll() {
             o.players = static_cast<int>(g["players"].integer()); o.max_players = static_cast<int>(g["maxPlayers"].integer());
             s.games.push_back(o);
         }
-        for (const auto& c : v["chat"].items) {
+    });
+}
+// The first batch after watching is the recent history and replaces what we had.
+void ApplyChat(const hp_json::Value& v, bool replace) {
+    Publish([&](Snapshot& s) {
+        if (replace) s.chat.clear();
+        for (const auto& c : v.items) {
             ChatLine line; line.id = c["id"].integer(); line.name = GameText(c["name"].str()); line.text = GameText(c["text"].str());
-            if (line.id > lastChat) lastChat = line.id;
             s.chat.push_back(line);
         }
         if (s.chat.size() > 100) s.chat.erase(s.chat.begin(), s.chat.end() - 100);
     });
 }
 
-void Worker() {
-    for (;;) {
-        std::function<void()> action; bool polling = false;
-        {
-            std::unique_lock<std::mutex> lock(mutex);
-            wake.wait_for(lock, std::chrono::seconds(open ? 2 : 3600), [] { return !actions.empty(); });
-            if (!actions.empty()) { action = std::move(actions.front()); actions.pop_front(); }
-            polling = open;
-        }
-        if (polling) {
-            const auto fresh = ReadSettings();
-            if (fresh.server != settings.server) { lastBody.clear(); lastChat = 0; Publish([](Snapshot& s) { s.chat.clear(); }); }
-            settings = fresh;
-        }
-        if (action) action();
-        if (polling) Poll();
+enum class Ended { Retry, Now, Wait };
+
+// One connection: sign in, watch the lobby, apply what the server pushes until it ends.
+Ended Session() {
+    if (settings.server.empty()) {
+        Offline("No server set: put server=http://host:port in HeroesPost.ini in the HotA folder.");
+        return Ended::Wait;
     }
+    bool fresh = false;
+    if (!EnsureIdentity(fresh)) return Ended::Retry;
+    const auto info = Request(settings.server, "GET", "/api/relay", "");
+    hp_json::Value v;
+    if (info.status != 200 || !hp_json::Parse(info.body, v) || v["port"].integer() <= 0) {
+        Offline("Cannot reach " + settings.server + ": " + GameText(info.status == 200 ? "the server has no game relay" : Problem(info)));
+        return Ended::Retry;
+    }
+    Url url; Crack(settings.server, url);
+    const auto host = Narrow(url.host, CP_UTF8); const int port = static_cast<int>(v["port"].integer());
+    std::string error;
+    const SOCKET s = Dial(host, port, error);
+    if (s == INVALID_SOCKET) { Offline("Cannot reach " + settings.server + ": " + error); return Ended::Retry; }
+    { std::lock_guard<std::mutex> lock(sendMutex); relay = s; }
+    std::string player; { std::lock_guard<std::mutex> lock(mutex); player = name; }
+    Frame hello(C_HELLO); hello.u32(ProtocolVersion).blob(settings.token).blob(player);
+    Frame watch(C_LOBBY_WATCH);
+    Publish([&](Snapshot& snap) { snap.server = settings.server; snap.relay_host = host; snap.relay_port = port; snap.ticket = settings.token; });
+
+    Ended ended = Ended::Retry; bool firstChat = true;
+    if (Post(hello) && Post(watch)) {
+        std::vector<std::uint8_t> frame;
+        for (;;) {
+            std::uint8_t header[4];
+            if (!ReadExact(s, header, 4)) break;
+            const std::uint32_t length = header[0] | header[1] << 8 | header[2] << 16 | static_cast<std::uint32_t>(header[3]) << 24;
+            if (length < 2 || length > MaxFrame) break;
+            frame.resize(length);
+            if (!ReadExact(s, frame.data(), length)) break;
+            const std::uint16_t type = static_cast<std::uint16_t>(frame[0] | frame[1] << 8);
+            Reader r{frame, 2};
+            if (type == S_LOBBY_STATE || type == S_LOBBY_CHAT) {
+                hp_json::Value json;
+                if (!hp_json::Parse(r.blob(), json)) continue;
+                if (type == S_LOBBY_STATE) ApplyState(json);
+                else { ApplyChat(json, firstChat); firstChat = false; }
+            } else if (type == S_LOBBY_NOTICE) {
+                const auto code = r.u32(); const auto text = GameText(r.blob());
+                if (code == NOTICE_SIGN_IN) {
+                    // The server no longer knows this identity (a new database): make a new one once.
+                    if (fresh) { Offline("The server refused a new identity: " + text); ended = Ended::Wait; break; }
+                    settings.token.clear();
+                    ended = Ended::Now;
+                    break;
+                }
+                Publish([&](Snapshot& snap) { snap.status = text; });
+            }
+        }
+    }
+    { std::lock_guard<std::mutex> lock(sendMutex); closesocket(relay); relay = INVALID_SOCKET; }
+    if (ended == Ended::Retry) Offline("Lost the connection to " + settings.server + ". Reconnecting...");
+    return ended;
 }
-void Enqueue(std::function<void()> action) {
-    { std::lock_guard<std::mutex> lock(mutex); actions.push_back(std::move(action)); }
-    wake.notify_one();
+
+void Worker() {
+    WSADATA wsa{}; WSAStartup(MAKEWORD(2, 2), &wsa);
+    int delay = 0;
+    for (;;) {
+        {
+            // Wait until the lobby has been opened once, then for the retry delay or a kick.
+            std::unique_lock<std::mutex> lock(mutex);
+            wake.wait(lock, [] { return wanted; });
+            if (delay) wake.wait_for(lock, std::chrono::seconds(delay), [] { return kick; });
+            kick = false;
+        }
+        const auto fresh = ReadSettings();
+        if (fresh.server != settings.server) Publish([](Snapshot& s) { s.chat.clear(); s.mine.clear(); s.games.clear(); });
+        settings = fresh;
+        const auto began = std::chrono::steady_clock::now();
+        const Ended ended = Session();
+        if (ended == Ended::Wait) {
+            std::unique_lock<std::mutex> lock(mutex);
+            wake.wait(lock, [] { return kick; });
+            delay = 0;
+        } else if (ended == Ended::Now) delay = 0;
+        // A connection that lasted a while starts the back-off over.
+        else delay = std::chrono::steady_clock::now() - began > std::chrono::minutes(1) ? 2 : (delay ? (delay * 2 > 30 ? 30 : delay * 2) : 2);
+    }
 }
 }
 
@@ -256,37 +378,37 @@ void Start(const std::wstring& folder, HWND window) {
     if (started) return;
     started = true; notifyWindow = window; iniPath = folder + L"\\HeroesPost.ini";
     WriteTemplate();
-    settings = ReadSettings();
-    state.server = settings.server;
+    state.server = ReadSettings().server;
     std::thread(Worker).detach();
 }
 void Open(const std::string& player_name) {
+    const auto server = ReadSettings().server;
+    bool redial = false;
     {
         std::lock_guard<std::mutex> lock(mutex);
         open = true; name = player_name;
-        if (!state.online) { state.status = "Connecting..."; ++state.version; }
+        // The player may have edited HeroesPost.ini since: a new server means a new connection.
+        redial = wanted && server != state.server;
+        if (!wanted || redial || !state.online) { wanted = true; kick = true; }
+        if (!state.online) state.status = "Connecting...";
+        state.server = server;
+        ++state.version;
     }
-    // Publish the next reply even if it matches the last one: the window is new.
-    Enqueue([] { lastBody.clear(); });
+    if (redial) Drop();
+    wake.notify_all();
 }
 void Close() { std::lock_guard<std::mutex> lock(mutex); open = false; }
 Snapshot Get() { std::lock_guard<std::mutex> lock(mutex); return state; }
 
 void SendChat(const std::string& text) {
-    const auto body = "{\"text\":" + JsonString(Utf8Text(text)) + "}";
-    Enqueue([body] {
-        if (!EnsureIdentity()) return;
-        const auto r = Request(settings.server, "POST", "/api/relay/chat", settings.token, body);
-        if (r.status != 200) { const auto why = GameText(Problem(r)); Publish([&](Snapshot& s) { s.status = "Message not sent: " + why; }); }
-    });
+    Frame frame(C_LOBBY_CHAT); frame.blob(Utf8Text(text));
+    if (!Post(frame)) Publish([](Snapshot& s) { s.status = "Message not sent: not connected to the server."; });
 }
 void SetTurnLimit(const std::string& game_id, int seconds) {
-    Enqueue([game_id, seconds] {
-        if (!EnsureIdentity()) return;
-        const auto r = Request(settings.server, "PUT", "/api/relay/games/" + game_id + "/turn-limit", settings.token,
-            "{\"turnSeconds\":" + std::to_string(seconds) + "}");
-        if (r.status != 200) { const auto why = GameText(Problem(r)); Publish([&](Snapshot& s) { s.status = "Turn limit not changed: " + why; }); }
-        lastBody.clear();
-    });
+    // Relay game ids are .NET Guids; IIDFromString gives the same byte order as Guid.ToByteArray.
+    GUID id{};
+    if (FAILED(IIDFromString(Wide("{" + game_id + "}", CP_UTF8).c_str(), &id))) return;
+    Frame frame(C_LOBBY_TURN_LIMIT); frame.bytes(&id, sizeof id).u32(static_cast<std::uint32_t>(seconds));
+    if (!Post(frame)) Publish([](Snapshot& s) { s.status = "Turn limit not changed: not connected to the server."; });
 }
 }

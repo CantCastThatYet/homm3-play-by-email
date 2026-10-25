@@ -69,9 +69,14 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
     private readonly Dictionary<IRelayPeer, RelaySession> membership = [];
     private readonly Dictionary<IRelayPeer, (RelayEntity Seat, int From)> claims = [];
 
+    /// <summary>Raised under the hub lock when sessions or seats change; handlers may only schedule work.</summary>
+    public event Action? Changed;
+
     public IReadOnlyList<RelaySessionInfo> Sessions() { lock (gate) return sessions.Select(s => s.Current).ToList(); }
 
-    public void Disconnected(IRelayPeer peer) { lock (gate) { Leave(peer); accounts.Remove(peer); } }
+    public RelayAccount? Account(IRelayPeer peer) { lock (gate) return accounts.GetValueOrDefault(peer); }
+
+    public void Disconnected(IRelayPeer peer) { lock (gate) { var member = membership.ContainsKey(peer); Leave(peer); accounts.Remove(peer); if (member) Changed?.Invoke(); } }
 
     public IReadOnlyList<RelayGameView> Games()
     {
@@ -88,7 +93,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
         {
             var session = sessions.FirstOrDefault(s => s.Info.Instance == instance);
             if (session is null) return false;
-            session.TurnSeconds = seconds; return true;
+            session.TurnSeconds = seconds; Changed?.Invoke(); return true;
         }
     }
 
@@ -98,34 +103,41 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
         var r = new FrameReader(frame, 2);
         lock (gate)
         {
-            switch (type)
-            {
-                case RelayProtocol.Hello:
-                    var version = r.U32(); var ticket = r.Str(); var name = r.Str();
-                    var account = ticket.Length == 0 ? null : Authenticate(ticket);
-                    if (account is not null) accounts[peer] = account;
-                    else if (ticket.Length != 0) logger.LogWarning("Relay client {Peer} presented an unknown ticket", peer.Label);
-                    logger.LogInformation("Relay client {Peer} connected as {Name} ({Account}), protocol {Version}", peer.Label, name, account?.Name ?? "no account", version);
-                    return;
-                case RelayProtocol.Enum: EnumSessions(peer, r); return;
-                case RelayProtocol.Open: Open(peer, r); return;
-                case RelayProtocol.Rejoin: Rejoin(peer, r); return;
-                case RelayProtocol.CreatePlayer: CreateEntity(peer, r, group: false); return;
-                case RelayProtocol.CreateGroup: CreateEntity(peer, r, group: true); return;
-                case RelayProtocol.DestroyPlayer:
-                case RelayProtocol.DestroyGroup: Destroy(peer, r); return;
-                case RelayProtocol.Send: Send(peer, r); return;
-                case RelayProtocol.Chat: Chat(peer, r); return;
-                case RelayProtocol.SetName: SetName(peer, r); return;
-                case RelayProtocol.SetData: SetData(peer, r); return;
-                case RelayProtocol.SetSession: SetSession(peer, r); return;
-                case RelayProtocol.GroupMember: GroupMember(peer, r); return;
-                case RelayProtocol.GroupInGroup: GroupInGroup(peer, r); return;
-                case RelayProtocol.Close:
-                    var request = r.U32(); Leave(peer); Reply(peer, request, RelayProtocol.Ok); return;
-                default:
-                    logger.LogWarning("Relay client {Peer} sent unknown frame {Type}", peer.Label, type); return;
-            }
+            Dispatch(peer, type, r);
+            if (type is RelayProtocol.Open or RelayProtocol.Rejoin or RelayProtocol.CreatePlayer or RelayProtocol.DestroyPlayer
+                or RelayProtocol.SetName or RelayProtocol.SetSession or RelayProtocol.Close) Changed?.Invoke();
+        }
+    }
+
+    private void Dispatch(IRelayPeer peer, ushort type, FrameReader r)
+    {
+        switch (type)
+        {
+            case RelayProtocol.Hello:
+                var version = r.U32(); var ticket = r.Str(); var name = r.Str();
+                var account = ticket.Length == 0 ? null : Authenticate(ticket);
+                if (account is not null) accounts[peer] = account;
+                else if (ticket.Length != 0) logger.LogWarning("Relay client {Peer} presented an unknown ticket", peer.Label);
+                logger.LogInformation("Relay client {Peer} connected as {Name} ({Account}), protocol {Version}", peer.Label, name, account?.Name ?? "no account", version);
+                return;
+            case RelayProtocol.Enum: EnumSessions(peer, r); return;
+            case RelayProtocol.Open: Open(peer, r); return;
+            case RelayProtocol.Rejoin: Rejoin(peer, r); return;
+            case RelayProtocol.CreatePlayer: CreateEntity(peer, r, group: false); return;
+            case RelayProtocol.CreateGroup: CreateEntity(peer, r, group: true); return;
+            case RelayProtocol.DestroyPlayer:
+            case RelayProtocol.DestroyGroup: Destroy(peer, r); return;
+            case RelayProtocol.Send: Send(peer, r); return;
+            case RelayProtocol.Chat: Chat(peer, r); return;
+            case RelayProtocol.SetName: SetName(peer, r); return;
+            case RelayProtocol.SetData: SetData(peer, r); return;
+            case RelayProtocol.SetSession: SetSession(peer, r); return;
+            case RelayProtocol.GroupMember: GroupMember(peer, r); return;
+            case RelayProtocol.GroupInGroup: GroupInGroup(peer, r); return;
+            case RelayProtocol.Close:
+                var request = r.U32(); Leave(peer); Reply(peer, request, RelayProtocol.Ok); return;
+            default:
+                logger.LogWarning("Relay client {Peer} sent unknown frame {Type}", peer.Label, type); return;
         }
     }
 
@@ -311,6 +323,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
         if (!session.Started && message.Id == GameMessage.LoadGame)
         {
             session.Started = true;
+            Changed?.Invoke();
             logger.LogInformation("Relay session {Name} started; departures now hold seats", session.Info.Name);
         }
         var recipients = Recipients(session, from, to);

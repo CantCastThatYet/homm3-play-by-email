@@ -33,7 +33,8 @@ public sealed class StandInManager(RelayHub hub, RelayCaptures captures, RelaySe
     private readonly HashSet<string> reported = [];
 
     public bool Enabled => OperatingSystem.IsWindows() && copies.Length > 0 && native is not null;
-    public int DefaultTurnSeconds { get; } = config.GetValue("StandIn:TurnSeconds", 600);
+    public int DefaultTurnSeconds { get; } = TurnSecondsSetting(config);
+    public static int TurnSecondsSetting(IConfiguration config) => config.GetValue("StandIn:TurnSeconds", 600);
 
     public RelayAccount Account => new("standin", "Stand-in", StandIn: true);
 

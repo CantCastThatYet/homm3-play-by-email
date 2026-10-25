@@ -19,6 +19,14 @@ public static class RelayProtocol
     public const ushort Reply = 100, Deliver = 101, Created = 102, Destroyed = 103, Name = 104, Data = 105, Session = 106,
         Member = 107, Host = 108, ChatMessage = 109, SessionLost = 110, GroupInGroupChanged = 111;
 
+    // The in-game lobby on its own connection, after Hello. LobbyWatch subscribes; LobbyChat
+    // carries UTF-8 text; LobbyTurnLimit is a game id and seconds. The server pushes
+    // LobbyState (UTF-8 JSON RelayLobby) when it changes, LobbyChatLines (UTF-8 JSON array of
+    // RelayChatLine) and LobbyNotice (u32 code, UTF-8 text).
+    public const ushort LobbyWatch = 17, LobbyChat = 18, LobbyTurnLimit = 19;
+    public const ushort LobbyState = 112, LobbyChatLines = 113, LobbyNotice = 114;
+    public const uint NoticeText = 0, NoticeSignIn = 1;
+
     // DirectPlay HRESULTs reported back to the engine.
     public const uint Ok = 0, ErrGeneric = 0x80004005, ErrInvalidParams = 0x80070057, ErrAccessDenied = 0x8877000A,
         ErrCantCreatePlayer = 0x88770046, ErrInvalidPlayer = 0x88770096, ErrInvalidGroup = 0x8877009B,

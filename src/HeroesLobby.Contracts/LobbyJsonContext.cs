@@ -32,6 +32,5 @@ namespace HeroesLobby.Contracts;
 [JsonSerializable(typeof(RelayClaim))]
 [JsonSerializable(typeof(RelayTurnLimit))]
 [JsonSerializable(typeof(RelayLobby))]
-[JsonSerializable(typeof(RelayChatPost))]
-[JsonSerializable(typeof(RelayChatLine))]
+[JsonSerializable(typeof(List<RelayChatLine>))]
 public partial class LobbyJsonContext : JsonSerializerContext;
