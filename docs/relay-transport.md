@@ -41,8 +41,62 @@ transport differs. HotA's native TCP/IP join screen lists the relay's sessions.
   messages sent/delivered. No DirectPlay provider was used.
 - Existing C# suite: 34/34 passed.
 
-## Not yet done
+## Away seats, rejoin and the server stand-in
 
-Players leaving and rejoining still behave like stock DirectPlay: a closed client is
-reported to the others as a departed player. Holding away seats on the server and
-rejoining a running game is the next stage.
+Once the host transmits the started world (engine message `0x3E8`), the relay holds
+seats: a client that disconnects, closes or destroys its player becomes *away*. The
+other clients are not told, so their engines never run HotA's departure, save-and-exit
+or AI-conversion paths. The relay logs every game message delivered to each player.
+
+A fresh HotA process takes a held seat back by resuming a capture of that seat:
+
+1. A live client's seat is captured either at its native End Turn (`watch-completion
+   <pid> snapshot`) or at an idle adventure-map moment (`capture-current <pid>`). The
+   manifest records `relay_consumed`, the number of relay game messages its engine had
+   taken.
+2. The new process's `HeroesPost.relay.ini` adds `rejoin=<session name>`, `seat=<player
+   name>` and `from=<relay_consumed>` (`NativeHost resume` writes `from`). The existing
+   resume transaction loads the captured world, both baselines, simultaneous-turn state
+   and roster into a single-player scaffold. Its own session setup then reaches the
+   relay as `Rejoin` instead of creating a session, and its `CreatePlayer` receives the
+   held seat's original player ID.
+3. The relay replays the seat's messages from `from` onward. The client withholds them
+   from the engine until the resume audit has passed. It then attaches the adventure
+   manager's network handler, which native `Start` skipped because the scaffold had no
+   transport, and restores the human players' names from the relay. After that it is
+   an ordinary participant: it answers the day barrier, receives and merges worlds, and
+   broadcasts like the original client.
+
+The same mechanism is the server-side stand-in. When a player leaves after End Turn,
+the server resumes that player's completion capture in its own HotA copy, and the
+stand-in completes the day for the seat. When the player returns, the stand-in is
+captured and closed, and the player's client resumes from that capture.
+
+### Verification, 2026-10-25
+
+All runs used two humans on Judgement Day with simultaneous turns, driven by
+`.scratch/relay-dev/scenario.sh` and `handover.sh`, and ended turns without moving heroes:
+
+- Blue was captured mid-turn on day 2 and its process killed; Red ended its turn and
+  waited at the barrier with no departure dialog. A fresh process resumed Blue's seat
+  and ended its turn. Red sent its world, the resumed Blue merged and broadcast, and
+  both reached day 3, then day 4.
+- Handover: Blue ended day 2 and quit. A stand-in in a third game copy resumed Blue's
+  completion capture, and Red ended its turn; both reached day 3. The stand-in was
+  captured and closed, and Blue's own copy resumed it. Both ended day 3 and reached
+  day 4 with correct player names.
+- C# suite 38/38, including relay seat-hold and rejoin tests. Native suite passed;
+  `Native.RelayTest.exe` 35/35.
+
+### Not yet done
+
+- The handover is orchestrated by test scripts. Captures move through local files.
+  Nothing yet uploads captures through the relay, launches stand-ins on the server, or
+  hands a seat back when its player connects.
+- A process that crashes or quits mid-turn without a capture can only resume from its
+  last capture; moves since then are lost.
+- Not yet tested: hero moves, battles and contact across a handover; rejoining on
+  day 1; the host seat (Red, player ID 1) leaving; more than two humans; maps other
+  than Judgement Day.
+- HD's start-up update check once replaced `HD_HOTA.dll` in a test copy. The launcher
+  now sets `<Update.CheckAtStart> = 0` in owned copies.

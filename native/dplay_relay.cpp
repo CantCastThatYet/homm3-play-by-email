@@ -83,7 +83,7 @@ typedef BOOL(WINAPI* EnumAddressCallback)(REFGUID, DWORD, const void*, void*);
 enum : std::uint16_t {
     C_HELLO = 1, C_ENUM = 2, C_OPEN = 3, C_CREATE_PLAYER = 4, C_DESTROY_PLAYER = 5, C_SEND = 6,
     C_SET_NAME = 7, C_SET_DATA = 8, C_SET_SESSION = 9, C_CREATE_GROUP = 10, C_DESTROY_GROUP = 11,
-    C_GROUP_MEMBER = 12, C_CHAT = 13, C_CLOSE = 14, C_GROUP_IN_GROUP = 15,
+    C_GROUP_MEMBER = 12, C_CHAT = 13, C_CLOSE = 14, C_GROUP_IN_GROUP = 15, C_REJOIN = 16,
     S_REPLY = 100, S_DELIVER = 101, S_CREATED = 102, S_DESTROYED = 103, S_NAME = 104, S_DATA = 105,
     S_SESSION = 106, S_MEMBER = 107, S_HOST = 108, S_CHAT = 109, S_SESSION_LOST = 110, S_GROUP_IN_GROUP = 111
 };
@@ -204,6 +204,9 @@ std::string Hex(DWORD v) { char b[16]; std::snprintf(b, sizeof b, "%08lx", stati
 // -------------------------------------------------------------- statistics
 std::atomic<unsigned> statSent{0}, statDelivered{0}, statSystem{0}, statObjects{0};
 std::atomic<bool> statConnected{false}, statOpen{false};
+std::atomic<std::uint32_t> statConsumed{0};
+std::atomic<bool> holdGameMessages{false};
+std::map<std::uint32_t, std::string> rejoinNames; // guarded by statusMutex
 std::mutex statusMutex;
 std::string statusSession, statusError;
 Config installedConfig;
@@ -240,10 +243,11 @@ public:
         if (!r.ok || !created) return DPERR_CANTCREATEPLAYER;
         {
             std::lock_guard<std::mutex> lock(mutex);
+            const bool claimed = entities.count(created) != 0;
             auto& e = entities[created]; e.group = false; e.flags = flags | DPPLAYER_LOCAL; e.short_name = Short(name); e.long_name = Long(name);
             e.remote_data.assign(static_cast<std::uint8_t*>(data), static_cast<std::uint8_t*>(data) + (data ? size : 0));
             e.local = true; e.event = event;
-            ++session.current_players;
+            if (!claimed) ++session.current_players;
         }
         *id = created; Log("CreatePlayer " + Short(name) + " -> " + Hex(created) + " flags " + Hex(flags)); return DP_OK;
     }
@@ -328,9 +332,14 @@ public:
         if (open) return DPERR_ALREADYINITIALIZED;
         const DWORD mode = flags & (DPOPEN_JOIN | DPOPEN_CREATE);
         if (mode != DPOPEN_JOIN && mode != DPOPEN_CREATE) return DPERR_INVALIDPARAMS;
-        Writer w(C_OPEN); w.u32(0).u32(mode); WriteSession(w, FromDesc(*desc));
+        // A rejoining client's own session setup claims its held seat in the
+        // running game instead of creating a new session.
+        const bool rejoin = mode == DPOPEN_CREATE && !config.rejoin_seat.empty();
+        Writer w(rejoin ? C_REJOIN : C_OPEN); w.u32(0);
+        if (rejoin) w.str(config.rejoin_session).str(config.rejoin_seat).u32(config.rejoin_from);
+        else { w.u32(mode); WriteSession(w, FromDesc(*desc)); }
         std::vector<std::uint8_t> reply; const HRESULT hr = Request(std::move(w), &reply);
-        Log(std::string("Open ") + (mode == DPOPEN_CREATE ? "create " : "join ") + (desc->lpszSessionNameA ? desc->lpszSessionNameA : "") + " -> " + Hex(hr));
+        Log(std::string("Open ") + (rejoin ? "rejoin " + config.rejoin_session + " as " + config.rejoin_seat : std::string(mode == DPOPEN_CREATE ? "create " : "join ") + (desc->lpszSessionNameA ? desc->lpszSessionNameA : "")) + " -> " + Hex(hr));
         if (FAILED(hr)) { std::lock_guard<std::mutex> lock(mutex); early.clear(); return hr; }
         Reader r(reply, 0); auto s = ReadSession(r); const auto count = r.u32();
         std::map<DPID, Entity> snapshot;
@@ -342,10 +351,15 @@ public:
         }
         if (!r.ok) return DPERR_GENERIC;
         for (auto& [id, e] : snapshot) if (e.group && e.parent && snapshot.count(e.parent)) snapshot[e.parent].subgroups.push_back(id);
+        if (rejoin) {
+            std::lock_guard<std::mutex> lock(statusMutex);
+            for (auto& [id, e] : snapshot) if (!e.group) rejoinNames[id] = e.short_name;
+        }
         {
             std::lock_guard<std::mutex> lock(mutex);
             session = std::move(s); entities = std::move(snapshot); queue.clear();
-            host = mode == DPOPEN_CREATE; open = true;
+            host = mode == DPOPEN_CREATE && !rejoin; open = true;
+            statConsumed = rejoin ? config.rejoin_from : 0;
             // Events the relay sent after this reply but before this thread woke.
             auto pending = std::move(early); early.clear();
             for (auto& frame : pending) HandleLocked(frame);
@@ -357,13 +371,15 @@ public:
     virtual HRESULT WINAPI Receive(DPID* from, DPID* to, DWORD flags, void* data, DWORD* size) {
         if (!from || !to || !size) return DPERR_INVALIDPARAMS;
         std::lock_guard<std::mutex> lock(mutex);
+        const bool hold = holdGameMessages.load();
         for (auto it = queue.begin(); it != queue.end(); ++it) {
+            if (hold && it->from != DPID_SYSMSG) continue;
             if ((flags & DPRECEIVE_TOPLAYER) && it->to != *to) continue;
             if ((flags & DPRECEIVE_FROMPLAYER) && it->from != *from) continue;
             const HRESULT hr = it->payload.CopyTo(data, size);
             if (hr == DPERR_BUFFERTOOSMALL) return hr;
             *from = it->from; *to = it->to;
-            if (!(flags & DPRECEIVE_PEEK)) queue.erase(it);
+            if (!(flags & DPRECEIVE_PEEK)) { if (it->from != DPID_SYSMSG) ++statConsumed; queue.erase(it); }
             return hr;
         }
         return DPERR_NOMESSAGES;
@@ -890,6 +906,9 @@ bool ReadConfig(const std::wstring& path, Config& config, std::string* error) {
         else if (key == "port") { try { const auto p = std::stoul(value); if (p && p < 65536) c.port = static_cast<std::uint16_t>(p); } catch (...) {} }
         else if (key == "ticket") c.ticket = value;
         else if (key == "name") c.name = value;
+        else if (key == "rejoin") c.rejoin_session = value;
+        else if (key == "seat") c.rejoin_seat = value;
+        else if (key == "from") { try { c.rejoin_from = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) {} }
     }
     if (c.host.empty() || !c.port) { if (error) *error = "relay_config_requires_host_and_port"; return false; }
     config = c; return true;
@@ -907,6 +926,7 @@ HRESULT CreateLobby(void** out) {
 bool Install(const Config& config, std::string* error) {
     if (installed.load()) return true;
     installedConfig = config; logPath = config.log_path;
+    holdGameMessages = !config.rejoin_seat.empty();
     void* original = nullptr;
     if (!PatchImport(GetModuleHandleW(nullptr), "ole32.dll", "CoCreateInstance", reinterpret_cast<void*>(CoCreateInstanceHook), &original) || !original) {
         if (error) *error = "cocreateinstance_import_not_found";
@@ -918,6 +938,16 @@ bool Install(const Config& config, std::string* error) {
     return true;
 }
 bool Installed() noexcept { return installed.load(); }
+std::uint32_t ConsumedCount() noexcept { return statConsumed.load(); }
+void ReleaseGameMessages() noexcept { holdGameMessages = false; }
+bool RejoinPlayerName(std::uint32_t id, std::string& name) {
+    std::lock_guard<std::mutex> lock(statusMutex);
+    const auto it = rejoinNames.find(id); if (it == rejoinNames.end()) return false;
+    name = it->second; return true;
+}
+
+bool Rejoining() noexcept { return installed.load() && !installedConfig.rejoin_seat.empty(); }
+
 std::string StatusJson() {
     std::ostringstream o; std::string session, error;
     { std::lock_guard<std::mutex> lock(statusMutex); session = statusSession; error = statusError; }
@@ -925,6 +955,7 @@ std::string StatusJson() {
       << ",\"host\":" << hp::Json(installedConfig.host) << ",\"port\":" << installedConfig.port
       << ",\"objects\":" << statObjects.load() << ",\"connected\":" << (statConnected.load() ? "true" : "false")
       << ",\"sessionOpen\":" << (statOpen.load() ? "true" : "false") << ",\"session\":" << hp::Json(session)
+      << ",\"rejoinSeat\":" << hp::Json(installedConfig.rejoin_seat) << ",\"consumed\":" << statConsumed.load()
       << ",\"sent\":" << statSent.load() << ",\"delivered\":" << statDelivered.load() << ",\"system\":" << statSystem.load()
       << ",\"error\":" << hp::Json(error) << '}';
     return o.str();

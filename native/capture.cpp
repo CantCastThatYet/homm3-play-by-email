@@ -379,7 +379,7 @@ bool WriteEnvelope(const CaptureEnvelope& envelope, const std::wstring& output_d
             json << "{\"static_address\":" << envelope.flags[i].static_address << ",\"value\":"
                  << envelope.flags[i].value << '}';
         }
-        json << "],\n\"raw_st_metadata\":";
+        json << "],\n\"relay_consumed\":" << envelope.relay_consumed << ",\"raw_st_metadata\":";
         if (envelope.raw_st_metadata.empty()) json << "null";
         else {
             if (!write("st-metadata.bin", envelope.raw_st_metadata)) throw std::runtime_error("ST metadata write failed");

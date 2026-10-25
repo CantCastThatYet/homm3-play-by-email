@@ -149,7 +149,10 @@ public static partial class NativeBridge
         RejectLink(settingsPath);
         var settingsBytes = File.ReadAllBytes(settingsPath);
         var settingsText = System.Text.Encoding.Latin1.GetString(settingsBytes);
-        var startupSettings = settingsText.Replace("<Show Intro> = 1", "<Show Intro> = 0", StringComparison.Ordinal);
+        // HD's start-up update check replaces HD_HOTA.dll with a newer, unsupported
+        // build and restarts through its launcher; owned copies stay pinned.
+        var startupSettings = settingsText.Replace("<Show Intro> = 1", "<Show Intro> = 0", StringComparison.Ordinal)
+            .Replace("<Update.CheckAtStart> = 1", "<Update.CheckAtStart> = 0", StringComparison.Ordinal);
         if (startupSettings != settingsText) File.WriteAllBytes(settingsPath, System.Text.Encoding.Latin1.GetBytes(startupSettings));
         var executable = Path.Combine(root, Executable);
         using var game = Process.Start(new ProcessStartInfo(executable) { WorkingDirectory = root, UseShellExecute = false })

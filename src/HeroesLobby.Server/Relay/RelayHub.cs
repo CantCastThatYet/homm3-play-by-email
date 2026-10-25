@@ -13,7 +13,7 @@ public sealed class RelayEntity
 {
     public required uint Id { get; init; }
     public required bool Group { get; init; }
-    public required IRelayPeer Owner { get; init; }
+    public required IRelayPeer Owner { get; set; }
     public uint Flags { get; set; }
     public uint Parent { get; set; }
     public string Short { get; set; } = "";
@@ -21,6 +21,9 @@ public sealed class RelayEntity
     public byte[] Data { get; set; } = [];
     public List<uint> Members { get; } = [];
     public List<uint> Subgroups { get; } = [];
+    /// <summary>Game messages delivered to this player since it joined, in order. A resumed client replays from its captured count.</summary>
+    public List<byte[]> Delivered { get; } = [];
+    public const int DeliveredLimit = 200_000;
 }
 
 public sealed class RelaySession
@@ -29,6 +32,9 @@ public sealed class RelaySession
     public required IRelayPeer Host { get; set; }
     public List<IRelayPeer> Peers { get; } = [];
     public Dictionary<uint, RelayEntity> Entities { get; } = [];
+    /// <summary>Set once the host transmits the started world; from then on departures hold their seats.</summary>
+    public bool Started { get; set; }
+    public RelayJournal? Journal { get; set; }
     public uint PlayerCount => (uint)Entities.Values.Count(e => !e.Group);
     public RelaySessionInfo Current => Info with { CurrentPlayers = PlayerCount };
 }
@@ -38,11 +44,13 @@ public sealed class RelaySession
 /// relay's change notifications into the DirectPlay system messages the engine expects.
 /// All state is guarded by one lock; frames are only queued while holding it.
 /// </summary>
-public sealed class RelayHub(ILogger<RelayHub> logger)
+public sealed class RelayHub(ILogger<RelayHub> logger, IConfiguration config)
 {
+    private readonly string? journalDirectory = config["Relay:JournalDirectory"];
     private readonly object gate = new();
     private readonly List<RelaySession> sessions = [];
     private readonly Dictionary<IRelayPeer, RelaySession> membership = [];
+    private readonly Dictionary<IRelayPeer, (RelayEntity Seat, int From)> claims = [];
 
     public IReadOnlyList<RelaySessionInfo> Sessions() { lock (gate) return sessions.Select(s => s.Current).ToList(); }
 
@@ -62,6 +70,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
                     return;
                 case RelayProtocol.Enum: EnumSessions(peer, r); return;
                 case RelayProtocol.Open: Open(peer, r); return;
+                case RelayProtocol.Rejoin: Rejoin(peer, r); return;
                 case RelayProtocol.CreatePlayer: CreateEntity(peer, r, group: false); return;
                 case RelayProtocol.CreateGroup: CreateEntity(peer, r, group: true); return;
                 case RelayProtocol.DestroyPlayer:
@@ -119,6 +128,7 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
             session = new() { Info = info with { Instance = info.Instance == Guid.Empty ? Guid.NewGuid() : info.Instance }, Host = peer };
             if (sessions.Any(s => s.Info.Instance == session.Info.Instance)) { Reply(peer, request, RelayProtocol.ErrAccessDenied); return; }
             sessions.Add(session);
+            if (journalDirectory is not null) session.Journal = RelayJournal.Open(journalDirectory, session.Info);
             logger.LogInformation("Relay session {Name} created by {Peer}", info.Name, peer.Label);
         }
         else
@@ -132,16 +142,38 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
             logger.LogInformation("Relay client {Peer} joined session {Name}", peer.Label, session.Info.Name);
         }
         session.Peers.Add(peer); membership[peer] = session;
-        Reply(peer, request, RelayProtocol.Ok, w =>
+        Reply(peer, request, RelayProtocol.Ok, w => Snapshot(session, w));
+    }
+
+    private static void Snapshot(RelaySession session, FrameWriter w)
+    {
+        session.Current.Write(w);
+        w.U32((uint)session.Entities.Count);
+        foreach (var e in session.Entities.Values)
         {
-            session.Current.Write(w);
-            w.U32((uint)session.Entities.Count);
-            foreach (var e in session.Entities.Values)
-            {
-                w.U32(e.Id).U32(e.Group ? 1u : 0u).U32(e.Flags).U32(e.Parent).Str(e.Short).Str(e.Long).Blob(e.Data).U32((uint)e.Members.Count);
-                foreach (var m in e.Members) w.U32(m);
-            }
-        });
+            w.U32(e.Id).U32(e.Group ? 1u : 0u).U32(e.Flags).U32(e.Parent).Str(e.Short).Str(e.Long).Blob(e.Data).U32((uint)e.Members.Count);
+            foreach (var m in e.Members) w.U32(m);
+        }
+    }
+
+    /// <summary>
+    /// A resumed client joins a started game in place of a held seat. Its next CreatePlayer
+    /// takes that seat's identity, so the other clients' engines see the same player return.
+    /// </summary>
+    private void Rejoin(IRelayPeer peer, FrameReader r)
+    {
+        var request = r.U32(); var name = r.Str(); var seat = r.Str(); var from = r.U32();
+        if (!r.Ok || name.Length == 0 || seat.Length == 0) { Reply(peer, request, RelayProtocol.ErrInvalidParams); return; }
+        if (membership.ContainsKey(peer)) { Reply(peer, request, RelayProtocol.ErrAccessDenied); return; }
+        var held = sessions.Where(s => s.Started && s.Info.Name.StartsWith(name, StringComparison.Ordinal))
+            .SelectMany(s => s.Entities.Values.Where(e => !e.Group && e.Owner is AwaySeat && string.Equals(e.Short, seat, StringComparison.OrdinalIgnoreCase)).Select(e => (s, e)))
+            .ToList();
+        if (held.Count != 1) { logger.LogWarning("Relay client {Peer} cannot rejoin {Name} as {Seat}: {Count} held seats match", peer.Label, name, seat, held.Count); Reply(peer, request, RelayProtocol.ErrNoSessions); return; }
+        var (session, entity) = held[0];
+        if (from > entity.Delivered.Count) { logger.LogWarning("Relay client {Peer} resumes seat {Seat} at message {From} but only {Count} were delivered", peer.Label, seat, from, entity.Delivered.Count); Reply(peer, request, RelayProtocol.ErrInvalidParams); return; }
+        session.Peers.Add(peer); membership[peer] = session; claims[peer] = (entity, (int)from);
+        logger.LogInformation("Relay client {Peer} rejoins {Session} for seat {Id:x8} '{Seat}'", peer.Label, session.Info.Name, entity.Id, entity.Short);
+        Reply(peer, request, RelayProtocol.Ok, w => Snapshot(session, w));
     }
 
     private bool Member(IRelayPeer peer, out RelaySession session) => membership.TryGetValue(peer, out session!);
@@ -163,6 +195,16 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
         if (!r.Ok) { Reply(peer, request, RelayProtocol.ErrInvalidParams); return; }
         if (!Member(peer, out var session)) { Reply(peer, request, RelayProtocol.ErrAccessDenied); return; }
         if (parent != 0 && !(session.Entities.TryGetValue(parent, out var p) && p.Group)) { Reply(peer, request, RelayProtocol.ErrInvalidGroup); return; }
+        if (!group && claims.Remove(peer, out var claim))
+        {
+            var seat = claim.Seat;
+            if (seat.Owner is not AwaySeat || !session.Entities.ContainsKey(seat.Id)) { Reply(peer, request, RelayProtocol.ErrCantCreatePlayer); return; }
+            seat.Owner = peer;
+            Reply(peer, request, RelayProtocol.Ok, w => w.U32(seat.Id));
+            logger.LogInformation("Relay seat {Id:x8} '{Name}' in {Session} reclaimed by {Peer}; replaying messages {From}..{Count}", seat.Id, seat.Short, session.Info.Name, peer.Label, claim.From, seat.Delivered.Count);
+            foreach (var frame in seat.Delivered.Skip(claim.From)) peer.Post(frame);
+            return;
+        }
         uint id;
         if (!group && (flags & RelayProtocol.PlayerServer) != 0)
         {
@@ -188,6 +230,8 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
         var request = r.U32(); var id = r.U32();
         if (!Member(peer, out var session) || !session.Entities.TryGetValue(id, out var entity)) { Reply(peer, request, RelayProtocol.ErrInvalidPlayer); return; }
         if (entity.Owner != peer && !entity.Group) { Reply(peer, request, RelayProtocol.ErrAccessDenied); return; }
+        // A started game keeps the seat: the departing client becomes away instead of a removed player.
+        if (session.Started && !entity.Group) { Hold(session, peer, entity); Reply(peer, request, RelayProtocol.Ok); return; }
         Remove(session, entity, peer);
         Reply(peer, request, RelayProtocol.Ok);
     }
@@ -215,8 +259,22 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
     {
         var from = r.U32(); var to = r.U32(); r.U32(); var data = r.Blob();
         if (!r.Ok || !Member(peer, out var session) || !session.Entities.TryGetValue(from, out var sender) || sender.Owner != peer) return;
-        foreach (var recipient in Recipients(session, from, to))
-            recipient.Owner.Post(new FrameWriter(RelayProtocol.Deliver).U32(from).U32(recipient.Id).Blob(data).Finish());
+        var message = GameMessage.Parse(data);
+        if (!session.Started && message.Id == GameMessage.LoadGame)
+        {
+            session.Started = true;
+            logger.LogInformation("Relay session {Name} started; departures now hold seats", session.Info.Name);
+        }
+        var recipients = Recipients(session, from, to);
+        session.Journal?.Record(from, to, data);
+        if (message.Traced) logger.LogInformation("Game {Session} {From:x8}->{To:x8} {Message} to {Count}", session.Info.Name, from, to, message, recipients.Count);
+        else logger.LogDebug("Game {Session} {From:x8}->{To:x8} {Message}", session.Info.Name, from, to, message);
+        foreach (var recipient in recipients)
+        {
+            var frame = new FrameWriter(RelayProtocol.Deliver).U32(from).U32(recipient.Id).Blob(data).Finish();
+            if (recipient.Delivered.Count < RelayEntity.DeliveredLimit) recipient.Delivered.Add(frame);
+            recipient.Owner.Post(frame);
+        }
     }
 
     private void Chat(IRelayPeer peer, FrameReader r)
@@ -279,8 +337,16 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
 
     private void Leave(IRelayPeer peer)
     {
+        claims.Remove(peer);
         if (!membership.Remove(peer, out var session)) return;
         session.Peers.Remove(peer);
+        if (session.Started)
+        {
+            foreach (var player in session.Entities.Values.Where(e => e.Owner == peer && !e.Group).ToList()) Hold(session, peer, player);
+            if (session.Host == peer && session.Entities.Values.FirstOrDefault(e => e.Owner is AwaySeat) is { } away) session.Host = away.Owner;
+            logger.LogInformation("Relay client {Peer} left started session {Name}; {Live} live clients remain", peer.Label, session.Info.Name, session.Peers.Count);
+            return;
+        }
         foreach (var player in session.Entities.Values.Where(e => e.Owner == peer && !e.Group).ToList()) Remove(session, player, peer);
         logger.LogInformation("Relay client {Peer} left session {Name}", peer.Label, session.Info.Name);
         if (session.Peers.Count == 0) { sessions.Remove(session); logger.LogInformation("Relay session {Name} closed", session.Info.Name); return; }
@@ -299,5 +365,58 @@ public sealed class RelayHub(ILogger<RelayHub> logger)
                 sessions.Remove(session);
             }
         }
+    }
+
+    /// <summary>
+    /// Keeps a departed player's seat in a started game. Other clients are not told: their
+    /// engines still see the player, and messages addressed to it are retained for the seat.
+    /// </summary>
+    private void Hold(RelaySession session, IRelayPeer peer, RelayEntity player)
+    {
+        if (player.Owner is AwaySeat) return;
+        player.Owner = new AwaySeat($"away:{player.Short}");
+        logger.LogInformation("Relay seat {Id:x8} '{Name}' in {Session} is away (was {Peer})", player.Id, player.Short, session.Info.Name, peer.Label);
+    }
+}
+
+/// <summary>Placeholder owner of a held seat. Its messages stay in the seat's delivery log.</summary>
+public sealed class AwaySeat(string label) : IRelayPeer
+{
+    public string Label { get; } = label;
+    public void Post(byte[] frame) { }
+}
+
+/// <summary>Engine message header (sender, ?, id, size), followed by the payload at +0x14.</summary>
+public readonly record struct GameMessage(uint Id, uint Size, uint Sub, int Length)
+{
+    public const uint LoadGame = 0x3E8, LoadChunk = 0x3E9, LoadResend = 0x3EA, LoadEnd = 0x3EB, Departure = 0x3F6, CurrentPlayer = 0x3F8,
+        LoadReceipt = 0x439, Simultaneous = 0x8A2;
+    public static GameMessage Parse(byte[] data)
+    {
+        uint At(int offset) => data.Length >= offset + 4 ? BitConverter.ToUInt32(data, offset) : 0;
+        return new(At(8), At(12), At(0x14), data.Length);
+    }
+    public bool Traced => Id is LoadGame or LoadEnd or LoadResend or Departure or CurrentPlayer or LoadReceipt or Simultaneous;
+    public override string ToString() => Id == Simultaneous ? $"0x{Id:x}/{Sub:x} ({Length} B)" : $"0x{Id:x} ({Length} B)";
+}
+
+/// <summary>Development journal of every game message in a session, for offline protocol analysis.</summary>
+public sealed class RelayJournal
+{
+    private readonly FileStream file;
+    private RelayJournal(FileStream file) => this.file = file;
+    public static RelayJournal Open(string directory, RelaySessionInfo info)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"{DateTime.UtcNow:yyyyMMdd-HHmmss}-{info.Instance:N}.bin");
+        return new(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read));
+    }
+    // Record: i64 unix ms, u32 from, u32 to, u32 length, bytes.
+    public void Record(uint from, uint to, byte[] data)
+    {
+        Span<byte> header = stackalloc byte[20];
+        BitConverter.TryWriteBytes(header, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        BitConverter.TryWriteBytes(header[8..], from); BitConverter.TryWriteBytes(header[12..], to); BitConverter.TryWriteBytes(header[16..], data.Length);
+        file.Write(header); file.Write(data); file.Flush();
     }
 }

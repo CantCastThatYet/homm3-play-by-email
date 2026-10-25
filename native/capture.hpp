@@ -77,6 +77,8 @@ struct CaptureEnvelope {
     std::string deferred_status = "unreadable";
     std::uint32_t deferred_declared_count = 0, deferred_capacity = 0;
     std::vector<DeferredPacket> deferred_packets;
+    // Relay game messages the engine had consumed at capture; -1 without the relay.
+    std::int64_t relay_consumed = -1;
 };
 
 CaptureEnvelope CaptureExistingBranch(const CaptureRequest& request) noexcept;

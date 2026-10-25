@@ -73,6 +73,9 @@ void BeginSession(const hota_menu::Dispatch& dispatch, void*) noexcept {
 
 void CaptureCurrentAtBoundary() noexcept;
 bool LeaseBlocksGameplay() noexcept {
+    // A relay rejoin owns its seat through the relay, which admits one live
+    // connection per seat; the lobby branch lease does not apply.
+    if(hp_relay::Rejoining())return false;
     const auto deadline=leaseDeadline.load();
     if(deadline&&GetTickCount64()>=deadline)leaseHeld.store(true);
     return leaseHeld.load();
@@ -175,6 +178,7 @@ void CaptureCompletion(const hota_completion::Snapshot& snapshot, void*) noexcep
         request.limits.max_stream_bytes = 32u * 1024 * 1024;
         request.limits.max_deferred_bytes = 4u * 1024 * 1024;
         auto result = std::make_unique<hota_capture::CaptureEnvelope>(hota_capture::CaptureExistingBranch(request));
+        if (hp_relay::Installed()) result->relay_consumed = hp_relay::ConsumedCount();
         if (result->status != "captured" || !result->metadata_valid || result->local_player != snapshot.local_player || result->current_player != snapshot.current_player ||
             result->st_day != snapshot.st_day || !result->world_date_valid ||
             result->world_date_words[0] != snapshot.world_date_words[0] || result->world_date_words[1] != snapshot.world_date_words[1] ||
@@ -274,6 +278,7 @@ void CaptureAfterSave() noexcept {
         request.limits.max_stream_bytes = 32u * 1024 * 1024;
         request.limits.max_deferred_bytes = 4u * 1024 * 1024;
         auto result = std::make_unique<hota_capture::CaptureEnvelope>(hota_capture::CaptureExistingBranch(request));
+        if (hp_relay::Installed()) result->relay_consumed = hp_relay::ConsumedCount();
         if(auditedCapturePending)AddRecoveryAudit(*result,pendingCaptureAudit);
         {
             std::lock_guard<std::mutex> lock(stateMutex);
@@ -362,7 +367,10 @@ unsigned __stdcall ReceiveFrameHook(HiHook* hook,unsigned a,unsigned b,int c,uns
     --receiveDepth;return result;
 }
 void* __stdcall ResumePollHook(HiHook* hook,void* self,unsigned char remove,unsigned char* decompressed) {
-    if(LeaseBlocksGameplay()||hota_resume::IsGameplayBlocked()||resume_session::IsGameplayBlocked()||hota_solo_transport::GetSnapshot().active){
+    // The solo transport has no peers, so nothing may be delivered. A relay
+    // rejoin's packets come from the live game and are dispatched normally.
+    const bool soloPeers=hota_solo_transport::GetSnapshot().active&&!hp_relay::Rejoining();
+    if(LeaseBlocksGameplay()||hota_resume::IsGameplayBlocked()||resume_session::IsGameplayBlocked()||soloPeers){
         if(decompressed){const unsigned char zero=0;SIZE_T wrote=0;WriteProcessMemory(GetCurrentProcess(),decompressed,&zero,1,&wrote);}
         return nullptr;
     }

@@ -80,6 +80,14 @@ public static partial class NativeBridge
             writer.Flush(); file.Flush(flushToDisk: true);
         }
         File.Move(temporary, target, overwrite: true);
+        // A relay rejoin resumes the seat's message stream where this capture left it.
+        var relayConfig = Path.Combine(root, "HeroesPost.relay.ini");
+        if (File.Exists(relayConfig) && manifest.TryGetProperty("relay_consumed", out var consumed) && consumed.GetInt64() >= 0)
+        {
+            var lines = File.ReadAllLines(relayConfig).Where(l => !l.TrimStart().StartsWith("from=", StringComparison.Ordinal)).ToList();
+            if (lines.Any(l => l.TrimStart().StartsWith("seat=", StringComparison.Ordinal)))
+                File.WriteAllLines(relayConfig, [.. lines, $"from={consumed.GetInt64()}"]);
+        }
         int pid=0;
         string? launchedIdentity=null;
         try {

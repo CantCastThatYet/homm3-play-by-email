@@ -14,7 +14,8 @@ public static class RelayProtocol
     public const int MaxFrame = 4 * 1024 * 1024;
 
     public const ushort Hello = 1, Enum = 2, Open = 3, CreatePlayer = 4, DestroyPlayer = 5, Send = 6, SetName = 7, SetData = 8,
-        SetSession = 9, CreateGroup = 10, DestroyGroup = 11, GroupMember = 12, Chat = 13, Close = 14, GroupInGroup = 15;
+        SetSession = 9, CreateGroup = 10, DestroyGroup = 11, GroupMember = 12, Chat = 13, Close = 14, GroupInGroup = 15,
+        Rejoin = 16;
     public const ushort Reply = 100, Deliver = 101, Created = 102, Destroyed = 103, Name = 104, Data = 105, Session = 106,
         Member = 107, Host = 108, ChatMessage = 109, SessionLost = 110, GroupInGroupChanged = 111;
 

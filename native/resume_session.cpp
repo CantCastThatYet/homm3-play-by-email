@@ -5,6 +5,7 @@
 #include "solo_transport.hpp"
 #include "solo_journal.hpp"
 #include "completion_observer.hpp"
+#include "dplay_relay.hpp"
 #include "common.hpp"
 #include <array>
 #include <atomic>
@@ -91,6 +92,31 @@ bool RestoreST(const Bundle& b,std::string& error){
        !Read(p,assignment.data(),heroes)||assignment!=b.hero_assignment){error="restored_st_verification_failed";return false;}
     return true;
 }
+// The scaffold's adventure manager started before any transport existed, so
+// native Start skipped its network handler (00406F60: 004076BB..00407700).
+// Without it ProcessMessage never polls game packets (00408710 calls
+// [adventure+38]->vtable[1] = 00557C10). Recreate it exactly as Start does.
+void AttachNetworkHandler(std::uint32_t adventure) {
+    std::uint32_t handler=1,net=0;
+    if(!adventure||!hp::Read(adventure+0x38,handler)||!hp::Read(0x69d858,net)||!net)throw std::runtime_error("relay_network_handler_state");
+    if(handler)return;
+    void* object=reinterpret_cast<void*(__cdecl*)(unsigned)>(0x617492)(12);
+    if(!object)throw std::runtime_error("relay_network_handler_allocation");
+    reinterpret_cast<void(__thiscall*)(void*)>(0x557ba0)(object);
+    *static_cast<std::uint32_t*>(object)=0x63a684;
+    *reinterpret_cast<void**>(adventure+0x38)=object;
+    reinterpret_cast<void(__thiscall*)(void*,void*)>(0x553b70)(reinterpret_cast<void*>(net),object);
+}
+// The single-player scaffold loader renames seats (004B9E30 sets "Computer").
+// In a network game each human's name is its network player name.
+void RestorePlayerNames(std::uint32_t world) {
+    const auto transport=hota_solo_transport::GetSnapshot();
+    for(unsigned c=0;c<8;++c){
+        std::string name;if(!transport.ids[c]||!hp_relay::RejoinPlayerName(transport.ids[c],name))continue;
+        char field[20]{};std::memcpy(field,name.data(),name.size()<19?name.size():19);
+        std::memcpy(reinterpret_cast<void*>(world+0x20b9c+c*0x168),field,sizeof field);
+    }
+}
 bool Authorize(void* context,std::uint32_t token,const hota_resume::Audit& a) noexcept {
     try{
         const auto& b=*static_cast<const Bundle*>(context);auto transport=hota_solo_transport::GetSnapshot();
@@ -172,17 +198,23 @@ bool TryAtAdventureBoundary() noexcept {
         Stage("audit_complete_recovery");
         if(!hota_resume::ReleaseAfterRebind(b.token,expected,Authorize,&b,&error))throw std::runtime_error(error);
         if(!hota_session::ReleaseScaffoldGate(b.token,&error))throw std::runtime_error(error);
+        if(hp_relay::Rejoining()){AttachNetworkHandler(loaded.after.adventure);RestorePlayerNames(loaded.after.world);}
         // A marker checkpoint precedes EndTurn's tail. Loading its world does
         // not recreate that call stack or prove a native wait-state continuation.
         const bool completed=b.kind==1||b.st[0x50+b.color*6+1]!=0;
         {std::lock_guard<std::mutex> l(mutex);snapshot.verified=true;snapshot.completed_input_held=completed;snapshot.stage=completed?"completed_checkpoint_held":"verified";snapshot.error.clear();queued=Bundle{};}
         owner_world=expected.world;owner_local=expected.local;owner_date=expected.date;
-        verified.store(true);held.store(completed);inside=false;return true; // first restored frame remains skipped
+        // A relay rejoin is a live participant: a completed seat answers the
+        // day barrier and merges like any other client, so it is not held.
+        verified.store(true);held.store(completed&&!hp_relay::Rejoining());inside=false;
+        // The restored seat now matches its capture; deliver what the live game sent since.
+        if(hp_relay::Rejoining())hp_relay::ReleaseGameMessages();
+        return true; // first restored frame remains skipped
     }catch(const std::exception& ex){Fail(ex.what());}catch(...){Fail("resume_transaction_exception");}
     inside=false;return true;
 }
 void ObserveCompletion(const hota_completion::Snapshot& mark) noexcept {
-    if(!verified.load()||GetCurrentThreadId()!=game_thread)return;
+    if(!verified.load()||GetCurrentThreadId()!=game_thread||hp_relay::Rejoining())return;
     try {
         {std::lock_guard<std::mutex> l(mutex);if(snapshot.completed_input_held)return;}
         held.store(true); // Before native tail redraw can pump nested dispatch.

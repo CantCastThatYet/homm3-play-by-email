@@ -1,5 +1,6 @@
 #include "solo_transport.hpp"
 #include "solo_journal.hpp"
+#include "dplay_relay.hpp"
 #include "common.hpp"
 #include "vendor/patcher_x86.hpp"
 #include <atomic>
@@ -92,6 +93,16 @@ bool ActivateAtBoundary(std::uint32_t token,std::uint32_t world,int local,int cu
         if(source_roster.size()!=r.size()){Error(e,"solo_source_roster_size");return false;}
         std::memcpy(r.data(),source_roster.data(),r.size());
         if(r[0]!=human_count||human_count<2){Error(e,"solo_protection_roster_mismatch");return false;}
+        // A relay rejoin occupies its own held seat in the running game: the other
+        // humans are live relay players with their original identities, not
+        // reserved offline placeholders, and packets go out through the relay.
+        const bool relay=hp_relay::Rejoining();
+        if(relay)for(unsigned i=0;i<r[0]&&i<8;++i){
+            auto* row=r.data()+3+i*23;const unsigned c=row[4];std::uint32_t id=0;std::memcpy(&id,row,4);
+            if(c>=8||!(mask&(1u<<c)))continue;
+            if(c==static_cast<unsigned>(local)?id!=dpid:(!id||id==dpid)){Error(e,"relay_rejoin_identity_mismatch");return false;}
+            ids[c]=id;
+        }
         unsigned seen=0;for(unsigned i=0;i<r[0];++i){auto* row=r.data()+3+i*23;unsigned c=row[4];if(c>=8||!(mask&(1u<<c))||(seen&(1u<<c))){Error(e,"solo_roster_color_mismatch");return false;}seen|=1u<<c;std::memcpy(row,&ids[c],4);}
         if(seen!=mask){Error(e,"solo_roster_incomplete");return false;}
         // All identity validation precedes the first mutation. Failure after this
@@ -112,7 +123,7 @@ bool ActivateAtBoundary(std::uint32_t token,std::uint32_t world,int local,int cu
         if(!Write(0x698a10,control)){Fault("solo_current_control_write");return false;}
         {std::lock_guard<std::mutex> l(mutex);state.token=token;state.transport=net;state.local_dpid=dpid;state.ids=ids;state.active=true;}
         humans=mask;local_color=local;
-        active_transport.store(true,std::memory_order_release);
+        if(!relay)active_transport.store(true,std::memory_order_release);
         // Exercise the installed enumeration path once before input can open.
         // Stack layout mirrors native5566D0; records and pointer array are native
         // allocations and released with the same native free used by that caller.
