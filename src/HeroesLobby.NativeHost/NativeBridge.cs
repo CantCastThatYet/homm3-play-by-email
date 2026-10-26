@@ -11,27 +11,47 @@ public static partial class NativeBridge
     public const string Marker = ".heroespost-owned-copy";
     public const string MarkerContent = "HeroesPost.Native.v1";
     public const string Executable = "h3hota HD.exe";
-    // This is an experimental adapter for one inspected build, not a general HotA SDK.
+    // This is an experimental adapter for inspected builds, not a general HotA SDK: HotA 1.8.1's own files
+    // with one of the HD Mod builds the adapter knows (native/supported_build.hpp).
     public static IReadOnlyDictionary<string, string> Fingerprints { get; } = new Dictionary<string, string>
     {
         [Executable] = "5AAAB925F06CCCF23BB09814767590A95B84A557EB33D244800520BE4F1F18DE",
-        ["_HD3_.dll"] = "3ED1852E08BAE7BE2461B31BD922531CCB0C46D01E5B0ECF46D0E7D0DBEEAB49",
-        ["HD_HOTA.dll"] = "0A2C193D0C510D77080B669A710694EF282761B0EC6F6AC5B86F3166B8038550",
-        ["HW_HOTA.dll"] = "927A087C6D05D40C83DE270516F48FDBD1360614259D30689179C1F7300F08DB",
-        ["_HD3_Data/HotA.dll_181fix"] = "1FA9AD209E756D55E9578B290C4FE6C9BA030D3B52AF2085E530416A61AC10C2",
-        ["patcher_x86.dll"] = "6134C353E5AC2A056E52BF548CDEA853C4424FA5F955DF1F5A1F073D784BAB40"
+        ["_HD3_Data/HotA.dll_181fix"] = "1FA9AD209E756D55E9578B290C4FE6C9BA030D3B52AF2085E530416A61AC10C2"
     };
+    public static IReadOnlyList<IReadOnlyDictionary<string, string>> HdBuilds { get; } =
+    [
+        new Dictionary<string, string> // HD 5.8 R22
+        {
+            ["HD_HOTA.dll"] = "0A2C193D0C510D77080B669A710694EF282761B0EC6F6AC5B86F3166B8038550",
+            ["HW_HOTA.dll"] = "927A087C6D05D40C83DE270516F48FDBD1360614259D30689179C1F7300F08DB",
+            ["patcher_x86.dll"] = "6134C353E5AC2A056E52BF548CDEA853C4424FA5F955DF1F5A1F073D784BAB40",
+            ["_HD3_.dll"] = "3ED1852E08BAE7BE2461B31BD922531CCB0C46D01E5B0ECF46D0E7D0DBEEAB49"
+        },
+        new Dictionary<string, string> // HD 5.8 R24
+        {
+            ["HD_HOTA.dll"] = "50825B7D5DD53B899C0C749258AE8B1299FC993BDDE4D4044C2916A660704ACA",
+            ["HW_HOTA.dll"] = "903B3B5BB4E704A50DE4CC9581D7CF585BB34EA833150F50BD7EDD5835DB2154",
+            ["patcher_x86.dll"] = "9DE3C571DE02430045F332B1A129B8BA31298F9AE7529F554C679DA8A571EE22",
+            ["_HD3_.dll"] = "8E03493C16CD242CEF66336721E84CD8E71049674F72D1D69DD7A02723A285D8"
+        }
+    ];
 
     public static void VerifyBuild(string root)
     {
-        foreach (var (relative, expected) in Fingerprints)
+        string Hash(string relative)
         {
             var path = Path.Combine(root, relative);
             RejectLink(path);
             using var file = File.OpenRead(path);
-            var actual = Convert.ToHexString(SHA256.HashData(file));
-            if (actual != expected) throw new InvalidOperationException($"Unsupported build: {relative} has SHA-256 {actual}. No game hooks were enabled.");
+            return Convert.ToHexString(SHA256.HashData(file));
         }
+        foreach (var (relative, expected) in Fingerprints)
+            if (Hash(relative) is var actual && actual != expected) throw new InvalidOperationException($"Unsupported build: {relative} has SHA-256 {actual}. No game hooks were enabled.");
+        var hd = Hash("HD_HOTA.dll");
+        var build = HdBuilds.FirstOrDefault(b => b["HD_HOTA.dll"] == hd)
+            ?? throw new InvalidOperationException($"Unsupported HD Mod build: HD_HOTA.dll has SHA-256 {hd}. No game hooks were enabled.");
+        foreach (var (relative, expected) in build)
+            if (Hash(relative) is var actual && actual != expected) throw new InvalidOperationException($"Unsupported build: {relative} has SHA-256 {actual}. No game hooks were enabled.");
     }
 
     public static string Prepare(string source, string destination)

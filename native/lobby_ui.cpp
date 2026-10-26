@@ -6,6 +6,7 @@
 #undef _UNICODE
 #pragma warning(push, 0)
 #include "vendor/H3API.hpp"
+#include "supported_build.hpp"
 #pragma warning(pop)
 #include "common.hpp"
 #include "lobby_ui.hpp"
@@ -806,7 +807,7 @@ struct PlayerRow { std::string name, state, turn; int color = -1; bool self = fa
 std::vector<PlayerRow> PlayerRows(std::string& note) {
     std::vector<PlayerRow> rows;
     unsigned char st[8][6]{}; unsigned simultaneous = 0;
-    const bool phase = hdBase && hp::Read(hdBase + 0x21004a, st) && hp::Read(hdBase + 0x210042, simultaneous);
+    const bool phase = hdBase && hp::Read(hdBase+hp_build::Rva(0x21004a), st) && hp::Read(hdBase+hp_build::Rva(0x210042), simultaneous);
     auto colorOf = [](const std::string& name) {
         for (int c = 0; c < 8; ++c) {
             const auto* player = reinterpret_cast<const char*>(&P_Main->players[c]);
@@ -1126,7 +1127,7 @@ void RequestSignIn(const std::string& account, const std::string& password, bool
 // Heroes Post game starts with them on until the latest date the dialog takes, 9 4 7 (day 252).
 void PvpOptionsLoaded() noexcept {
     if (!hosting || !hdBase || !hp_relay::Installed()) return;
-    auto* options = reinterpret_cast<volatile std::uint32_t*>(hdBase + 0x210006);
+    auto* options = reinterpret_cast<volatile std::uint32_t*>(hdBase+hp_build::Rva(0x210006));
     options[0] = 8 * 28 + 3 * 7 + 7; options[1] = 1; options[2] = 947;
     hp_keeper::Log("Simultaneous turns ticked for the host's PvP options");
 }

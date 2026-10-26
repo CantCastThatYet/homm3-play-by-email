@@ -1,4 +1,5 @@
 #include "memfile_import.hpp"
+#include "supported_build.hpp"
 #include "common.hpp"
 #include <algorithm>
 #include <array>
@@ -11,9 +12,10 @@
 
 namespace hota_memfile {
 namespace {
-constexpr std::uint32_t kRegistryRva = 0x21872c, kVtableRva = 0x202b14;
+// R22 addresses, translated for the running HD build.
+std::uint32_t RegistryRva() noexcept { return hp_build::Rva(0x21872c); }
+std::uint32_t VtableRva() noexcept { return hp_build::Rva(0x202b14); }
 constexpr std::size_t kHardStream = 64u * 1024u * 1024u;
-constexpr char kHash[] = "0a2c193d0c510d77080b669a710694ef282761b0ec6f6ac5b86f3166b8038550";
 #pragma pack(push, 1)
 struct Object {
     std::uint32_t vtable;
@@ -58,20 +60,19 @@ bool NativeFingerprint(void*, std::uint32_t base) noexcept {
                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 reinterpret_cast<LPCWSTR>(base), &module) ||
             reinterpret_cast<std::uintptr_t>(module) != base ||
-            hp::Sha256(hp::ModulePath(module)) != kHash) return false;
+            hp::Sha256(hp::ModulePath(module)) != hp_build::Current().files[0].sha256) return false;
         // Relocation-free entry prefixes from re/memfile-import-static.txt.
         constexpr std::uint8_t ctor[] = {0x55,0x8b,0xec,0x8b,0x45,0x08,0x56,0x8b,0xf1};
         constexpr std::uint8_t write[] = {0x55,0x8b,0xec,0x83,0xec,0x08,0x53,0x8b,0x5d,0x0c};
         constexpr std::uint8_t clear[] = {0x56,0x8b,0xf1,0x8b,0x8e,0x0c,0x01,0x00,0x00};
-        constexpr std::uint8_t alloc[] = {0x55,0x8b,0xec,0xeb,0x0d,0xff,0x75,0x08};
-        constexpr std::uint8_t sized_delete[] = {0x55,0x8b,0xec,0xff,0x75,0x08,0xe8,0x43,0x06,0x00,0x00,0x59,0x5d,0xc3};
-        if (!Signature(base + 0x46760, ctor, sizeof ctor) ||
-            !Signature(base + 0x46830, write, sizeof write) ||
-            !Signature(base + 0x46970, clear, sizeof clear) ||
-            !Signature(base + 0x1c5227, alloc, sizeof alloc) ||
-            !Signature(base + 0x1c55ba, sized_delete, sizeof sized_delete)) return false;
-        const auto* table = NativeMap(nullptr, base + kVtableRva, 12, false);
-        std::uint32_t expected[3] = {base + 0x5540, base + 0x467c0, base + 0x46830};
+        const auto& hd = hp_build::Current(); // operator new and sized delete differ between HD builds
+        if (!Signature(base+hp_build::Rva(0x46760), ctor, sizeof ctor) ||
+            !Signature(base+hp_build::Rva(0x46830), write, sizeof write) ||
+            !Signature(base+hp_build::Rva(0x46970), clear, sizeof clear) ||
+            !Signature(base+hp_build::Rva(0x1c5227), hd.allocate, hd.allocate_size) ||
+            !Signature(base+hp_build::Rva(0x1c55ba), hd.release, hd.release_size)) return false;
+        const auto* table = NativeMap(nullptr, base + VtableRva(), 12, false);
+        std::uint32_t expected[3] = {base+hp_build::Rva(0x5540), base+hp_build::Rva(0x467c0), base+hp_build::Rva(0x46830)};
         return table && std::memcmp(table, expected, sizeof expected) == 0;
     } catch (...) { return false; }
 }
@@ -80,21 +81,21 @@ std::uint32_t NativeCreate(void*, std::uint32_t base, const char* name) {
     using Allocate = void* (__cdecl*)(std::size_t);
     using Construct = void* (__thiscall*)(void*, const char*);
     using Delete = void (__cdecl*)(void*, std::size_t);
-    void* object = reinterpret_cast<Allocate>(base + 0x1c5227)(sizeof(Object));
+    void* object = reinterpret_cast<Allocate>(base+hp_build::Rva(0x1c5227))(sizeof(Object));
     if (!object) return 0;
-    try { reinterpret_cast<Construct>(base + 0x46760)(object, name); }
-    catch (...) { reinterpret_cast<Delete>(base + 0x1c55ba)(object, sizeof(Object)); throw; }
+    try { reinterpret_cast<Construct>(base+hp_build::Rva(0x46760))(object, name); }
+    catch (...) { reinterpret_cast<Delete>(base+hp_build::Rva(0x1c55ba))(object, sizeof(Object)); throw; }
     return reinterpret_cast<std::uint32_t>(object);
 }
 int NativeWrite(void*, std::uint32_t base, std::uint32_t object, const void* bytes, int count) {
     using Write = int (__thiscall*)(void*, const void*, int);
-    return reinterpret_cast<Write>(base + 0x46830)(reinterpret_cast<void*>(object), bytes, count);
+    return reinterpret_cast<Write>(base+hp_build::Rva(0x46830))(reinterpret_cast<void*>(object), bytes, count);
 }
 void NativeDestroy(void*, std::uint32_t base, std::uint32_t object) noexcept {
     using Clear = void (__thiscall*)(void*);
     using Delete = void (__cdecl*)(void*, std::size_t);
-    reinterpret_cast<Clear>(base + 0x46970)(reinterpret_cast<void*>(object));
-    reinterpret_cast<Delete>(base + 0x1c55ba)(reinterpret_cast<void*>(object), sizeof(Object));
+    reinterpret_cast<Clear>(base+hp_build::Rva(0x46970))(reinterpret_cast<void*>(object));
+    reinterpret_cast<Delete>(base+hp_build::Rva(0x1c55ba))(reinterpret_cast<void*>(object), sizeof(Object));
 }
 bool NativePreparationFingerprint() noexcept {
     try {
@@ -117,7 +118,7 @@ bool NativeEnsure(void*,std::uint32_t base,const char* name) noexcept {
     using Close=void(__thiscall*)(void*);
     __try {
         reinterpret_cast<Open>(0x4d6eb0)(file,name,"rb");
-        const bool native=file[0]==base+0x20ec60&&file[1]!=0;
+        const bool native=file[0]==base+hp_build::Rva(0x20ec60)&&file[1]!=0;
         reinterpret_cast<Close>(0x4d6fc0)(file);
         return native;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -146,7 +147,7 @@ std::uint8_t* Map(const testing::Backend& b, std::uint32_t address, std::size_t 
     return b.map(b.context, address, size, write);
 }
 bool ValidObject(const testing::Backend& b, const Object& o, std::uint32_t base) {
-    if (o.vtable != base + kVtableRva || !std::memchr(o.name, 0, sizeof o.name) || !o.name[0] ||
+    if (o.vtable != base + VtableRva() || !std::memchr(o.name, 0, sizeof o.name) || !o.name[0] ||
         o.length > o.capacity || o.cursor > o.length || o.capacity > kHardStream || o.open > 1 ||
         ((o.capacity == 0) != (o.payload == 0))) return false;
     if (!o.payload) return true;
@@ -155,7 +156,8 @@ bool ValidObject(const testing::Backend& b, const Object& o, std::uint32_t base)
     std::uint32_t tag = 0;
     if (!bytes) return false;
     std::memcpy(&tag, bytes, 4);
-    return tag == 0xf00dbeef;
+    const auto expected = hp_build::Current().payload_tag;
+    return !expected || tag == expected;
 }
 bool Overlaps(std::uint32_t a, std::size_t a_size, std::uint32_t b, std::size_t b_size) noexcept {
     return a_size && b_size && static_cast<std::uint64_t>(a) + a_size > b &&
@@ -188,10 +190,10 @@ Result Importer::EnsureRoles(const std::vector<Role>& roles) noexcept {
         for(std::size_t i=0;i<roles.size();++i){if(!Name(roles[i]))return {Error::InvalidRequest};
             for(std::size_t j=0;j<i;++j)if(roles[i]==roles[j])return {Error::InvalidRequest};}
         auto inspect=[&](const char* wanted,bool& found)->Error {
-            found=false;std::uint32_t r[3]{};auto* p=Map(backend_,hd_base_+kRegistryRva,sizeof r);
+            found=false;std::uint32_t r[3]{};auto* p=Map(backend_,hd_base_+RegistryRva(),sizeof r);
             if(!p)return Error::InvalidRegistry;std::memcpy(r,p,sizeof r);
             if(r[1]>256||r[2]>4096*4||r[2]%32||r[1]*4>r[2]||((r[2]==0)!=(r[0]==0))||
-               Overlaps(r[0],r[2],hd_base_+kRegistryRva,12))return Error::InvalidRegistry;
+               Overlaps(r[0],r[2],hd_base_+RegistryRva(),12))return Error::InvalidRegistry;
             auto* pointers=r[2]?Map(backend_,r[0],r[2]):nullptr;if(r[2]&&!pointers)return Error::InvalidRegistry;
             std::vector<Entry> seen;seen.reserve(r[1]);
             for(std::uint32_t i=0;i<r[1];++i) {
@@ -202,7 +204,7 @@ Result Importer::EnsureRoles(const std::vector<Role>& roles) noexcept {
                 const auto payload=e.before.payload?e.before.payload-4:0;
                 const std::size_t size=e.before.payload?e.before.capacity+4u:0;
                 if(Overlaps(address,sizeof(Object),r[0],r[2])||Overlaps(payload,size,r[0],r[2])||
-                   Overlaps(address,sizeof(Object),hd_base_+kRegistryRva,12)||Overlaps(payload,size,hd_base_+kRegistryRva,12)||
+                   Overlaps(address,sizeof(Object),hd_base_+RegistryRva(),12)||Overlaps(payload,size,hd_base_+RegistryRva(),12)||
                    Overlaps(address,sizeof(Object),payload,size))return Error::InvalidRegistry;
                 for(const auto& old:seen) {
                     const auto old_payload=old.before.payload?old.before.payload-4:0;
@@ -219,7 +221,7 @@ Result Importer::EnsureRoles(const std::vector<Role>& roles) noexcept {
         bool found=false;auto error=inspect(Name(roles.front()),found);if(error!=Error::None)return {error};
         for(auto role:roles) {
             error=inspect(Name(role),found);if(error!=Error::None)return {error};if(found)continue;
-            std::uint32_t count=0;auto* count_ptr=Map(backend_,hd_base_+kRegistryRva+4,4);
+            std::uint32_t count=0;auto* count_ptr=Map(backend_,hd_base_+RegistryRva()+4,4);
             if(!count_ptr)return {Error::InvalidRegistry};std::memcpy(&count,count_ptr,4);
             if(count>=256)return {Error::LimitExceeded};
             if(!admission_(admission_context_))return {Error::NotQuiescent};
@@ -265,13 +267,13 @@ Result Importer::Replace(const std::vector<Replacement>& requests, Limits limits
             total += size;
         }
         std::uint32_t registry[3]{};
-        auto* registry_live = Map(backend_, hd_base_ + kRegistryRva, sizeof registry);
+        auto* registry_live = Map(backend_, hd_base_ + RegistryRva(), sizeof registry);
         if (!registry_live) return {Error::InvalidRegistry};
         std::memcpy(registry, registry_live, sizeof registry);
         if (registry[1] > limits.max_registry_entries || registry[2] > 4096u * 4u || registry[2] % 32u ||
             registry[1] * 4u > registry[2] || ((registry[2] == 0) != (registry[0] == 0)))
             return {Error::InvalidRegistry};
-        if (Overlaps(registry[0], registry[2], hd_base_ + kRegistryRva, sizeof registry))
+        if (Overlaps(registry[0], registry[2], hd_base_ + RegistryRva(), sizeof registry))
             return {Error::InvalidRegistry};
         std::vector<std::uint32_t> addresses(registry[1]);
         auto* registry_array = registry[2] ? Map(backend_, registry[0], registry[2]) : nullptr;
@@ -290,9 +292,9 @@ Result Importer::Replace(const std::vector<Replacement>& requests, Limits limits
             const std::size_t payload_size = e.before.payload ? static_cast<std::size_t>(e.before.capacity) + 4 : 0;
             if (Overlaps(address, sizeof(Object), payload_start, payload_size) ||
                 Overlaps(address, sizeof(Object), registry[0], registry[2]) ||
-                Overlaps(address, sizeof(Object), hd_base_ + kRegistryRva, sizeof registry) ||
+                Overlaps(address, sizeof(Object), hd_base_ + RegistryRva(), sizeof registry) ||
                 Overlaps(payload_start, payload_size, registry[0], registry[2]) ||
-                Overlaps(payload_start, payload_size, hd_base_ + kRegistryRva, sizeof registry))
+                Overlaps(payload_start, payload_size, hd_base_ + RegistryRva(), sizeof registry))
                 return {Error::InvalidRegistry};
             for (const auto& other : entries)
                 if (SameName(e.before.name, other.before.name) ||

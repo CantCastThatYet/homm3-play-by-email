@@ -1,4 +1,5 @@
 #include "completion_observer.hpp"
+#include "supported_build.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -28,7 +29,7 @@ void Error(std::string* output, const char* message) noexcept {
     if (output) { try { *output = message; } catch (...) {} }
 }
 std::uintptr_t Address(std::uintptr_t base, std::uint32_t address) noexcept {
-    const auto offset = address - kPreferredHd;
+    const auto offset = hp_build::Rva(address - kPreferredHd);
     return base && base <= UINT32_MAX && offset <= UINT32_MAX - base ? base + offset : 0;
 }
 bool NativeRead(void*, std::uintptr_t address, void* output, std::size_t size) {

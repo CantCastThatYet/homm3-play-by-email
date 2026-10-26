@@ -41,7 +41,7 @@ const wchar_t* const Project = L"https://github.com/CantCastThatYet/homm3-play-b
 // ------------------------------------------------------------------------------------- text
 enum Text {
     Title, Heading, Intro, FolderLabel, Browse, InstallButton, UpdateButton, UninstallButton, CloseButton,
-    NoFolder, NoGame, Unsupported, Foreign, Ready, Installed, Running, Done, Removed, Failed, Refused, PickFolder,
+    NoFolder, NoGame, Unsupported, UnsupportedTail, Foreign, Ready, Installed, Running, Done, Removed, Failed, Refused, PickFolder,
     RemoveQuestion, TextCount
 };
 const wchar_t* const English[TextCount] = {
@@ -57,8 +57,9 @@ const wchar_t* const English[TextCount] = {
     L"Close",
     L"Choose the folder HotA is installed in (the one with h3hota HD.exe).",
     L"There is no h3hota HD.exe in this folder.",
-    L"This HotA version is not supported. Heroes Post works with HotA 1.8.1 and the HD Mod that comes with it. "
-    L"Different files: ",
+    L"This HotA or HD Mod version is not supported. Heroes Post works with the latest HotA 1.8.1 and HD Mod (",
+    L"). Start HotA with its launcher and let it update HotA and HD Mod, then run this setup again. If both are up "
+    L"to date, Heroes Post itself needs an update. Different files: ",
     L"This folder already has a version.dll from another mod. Heroes Post needs that file name, so it cannot "
     L"be installed here.",
     L"HotA 1.8.1 found. Heroes Post is not installed yet.",
@@ -85,8 +86,9 @@ const wchar_t* const Russian[TextCount] = {
     L"Закрыть",
     L"Выберите папку, в которую установлена HotA (где лежит h3hota HD.exe).",
     L"В этой папке нет h3hota HD.exe.",
-    L"Эта версия HotA не поддерживается. Heroes Post работает с HotA 1.8.1 и входящим в неё HD Mod. "
-    L"Отличаются файлы: ",
+    L"Эта версия HotA или HD Mod не поддерживается. Heroes Post работает с последними HotA 1.8.1 и HD Mod (",
+    L"). Запустите HotA через её лаунчер и дайте ему обновить HotA и HD Mod, затем снова запустите эту установку. "
+    L"Если всё уже обновлено, обновление нужно самому Heroes Post. Отличаются файлы: ",
     L"В этой папке уже есть version.dll от другого мода. Heroes Post нужен этот файл, поэтому сюда его "
     L"установить нельзя.",
     L"Найдена HotA 1.8.1. Heroes Post ещё не установлен.",
@@ -213,8 +215,13 @@ Inspection Inspect(const std::wstring& folder) {
     Inspection r;
     if (folder.empty() || GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES) return r;
     if (!HasGame(folder)) { r.kind = Inspection::NoGame; return r; }
-    for (const auto& file : hp_build::Files)
+    // HotA's own files, then those of the HD Mod build its HD_HOTA.dll belongs to.
+    auto check = [&](const hp_build::File& file) {
         if (Sha256(Join(folder, file.path)) != file.sha256) r.different += (r.different.empty() ? L"" : L", ") + std::wstring(file.path);
+    };
+    for (const auto& file : hp_build::Game) check(file);
+    const auto* hd = hp_build::FindHd(Sha256(Join(folder, L"HD_HOTA.dll")).c_str());
+    for (const auto& file : (hd ? *hd : hp_build::HdBuilds[_countof(hp_build::HdBuilds) - 1]).files) check(file);
     if (!r.different.empty()) { r.kind = Inspection::Unsupported; return r; }
     const auto loader = Join(folder, Loader);
     if (Exists(loader) && !OurLoader(loader)) { r.kind = Inspection::Foreign; return r; }
@@ -409,7 +416,11 @@ std::wstring StatusText(const Inspection& r) {
     switch (r.kind) {
     case Inspection::NoFolder: return T(NoFolder);
     case Inspection::NoGame: return T(NoGame);
-    case Inspection::Unsupported: return T(Unsupported) + r.different + L".";
+    case Inspection::Unsupported: {
+        std::wstring builds;
+        for (const auto& b : hp_build::HdBuilds) builds += (builds.empty() ? L"" : L", ") + std::wstring(b.name + 3); // without "HD "
+        return T(Unsupported) + builds + T(UnsupportedTail) + r.different + L".";
+    }
     case Inspection::Foreign: return T(Foreign);
     case Inspection::Ready: return T(Ready);
     default: return T(Installed);
@@ -514,7 +525,7 @@ HWND Child(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, i
     return c;
 }
 
-constexpr int Width = 520, Height = 246, Margin = 16;
+constexpr int Width = 520, Height = 296, Margin = 16;
 void Build() {
     const HWND heading = Child(L"STATIC", T(Heading), SS_LEFT, Margin, 14, Width - 2 * Margin, 26, 0);
     SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(ui.bold), TRUE);
@@ -522,12 +533,12 @@ void Build() {
     Child(L"STATIC", T(FolderLabel), SS_LEFT, Margin, 92, Width - 2 * Margin, 18, 0);
     ui.folder = Child(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, Margin, 112, Width - 2 * Margin - 104, 24, IdFolder, WS_EX_CLIENTEDGE);
     Child(L"BUTTON", T(Browse), WS_TABSTOP | BS_PUSHBUTTON, Width - Margin - 96, 111, 96, 26, IdBrowse);
-    ui.status = Child(L"STATIC", L"", SS_LEFT, Margin, 146, Width - 2 * Margin, 50, IdStatus);
-    ui.install = Child(L"BUTTON", T(InstallButton), WS_TABSTOP | BS_DEFPUSHBUTTON, Width - Margin - 3 * 104 + 8, 206, 96, 28, IdInstall);
-    ui.uninstall = Child(L"BUTTON", T(UninstallButton), WS_TABSTOP | BS_PUSHBUTTON, Width - Margin - 2 * 104 + 8, 206, 96, 28, IdUninstall);
-    Child(L"BUTTON", T(CloseButton), WS_TABSTOP | BS_PUSHBUTTON, Width - Margin - 104 + 8, 206, 96, 28, IdClose);
+    ui.status = Child(L"STATIC", L"", SS_LEFT, Margin, 146, Width - 2 * Margin, 100, IdStatus);
+    ui.install = Child(L"BUTTON", T(InstallButton), WS_TABSTOP | BS_DEFPUSHBUTTON, Width - Margin - 3 * 104 + 8, 256, 96, 28, IdInstall);
+    ui.uninstall = Child(L"BUTTON", T(UninstallButton), WS_TABSTOP | BS_PUSHBUTTON, Width - Margin - 2 * 104 + 8, 256, 96, 28, IdUninstall);
+    Child(L"BUTTON", T(CloseButton), WS_TABSTOP | BS_PUSHBUTTON, Width - Margin - 104 + 8, 256, 96, 28, IdClose);
     const auto version = Resource(StrVersion);
-    if (!version.empty()) Child(L"STATIC", (L"v" + version).c_str(), SS_LEFT, Margin, 212, 120, 18, 0);
+    if (!version.empty()) Child(L"STATIC", (L"v" + version).c_str(), SS_LEFT, Margin, 262, 120, 18, 0);
     SetWindowTextW(ui.folder, (ui.options.folder.empty() ? FindHota() : ui.options.folder).c_str());
     Refresh();
     SetFocus(IsWindowEnabled(ui.install) ? ui.install : ui.folder);

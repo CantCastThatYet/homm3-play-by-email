@@ -1,4 +1,5 @@
 #include "resume_session.hpp"
+#include "supported_build.hpp"
 #include "session_bootstrap.hpp"
 #include "world_resume.hpp"
 #include "memfile_import.hpp"
@@ -77,21 +78,21 @@ Bundle Decode(const std::vector<std::uint8_t>& bytes,std::uint32_t token){
 bool RestoreST(const Bundle& b,std::string& error){
     std::uint32_t count=0;
     const auto heroes=static_cast<std::uint32_t>(b.hero_assignment.size());
-    if(!hp::Read(hd+0x20fffe,count)||count){error="target_st_queue_not_empty";return false;}
+    if(!hp::Read(hd+hp_build::Rva(0x20fffe),count)||count){error="target_st_queue_not_empty";return false;}
     const unsigned char grow[]={0x55,0x8b,0xec,0x56,0x57,0x8b,0x7d,8,0x8b,0xf1,0x85,0xff};
-    if(!Bytes(hd+0x1952c0,grow,sizeof grow)){error="native_st_vector_grow_abi_mismatch";return false;}
+    if(!Bytes(hd+hp_build::Rva(0x1952c0),grow,sizeof grow)){error="native_st_vector_grow_abi_mismatch";return false;}
     std::uint32_t old_vector[3]{};
-    if(!Read(hd+0x21007a,old_vector,sizeof old_vector)||old_vector[1]>old_vector[2]||old_vector[2]>4096||
+    if(!Read(hd+hp_build::Rva(0x21007a),old_vector,sizeof old_vector)||old_vector[1]>old_vector[2]||old_vector[2]>4096||
        (old_vector[2]==0?old_vector[0]!=0:old_vector[0]==0)){error="target_st_vector_layout_invalid";return false;}
     if(old_vector[2]){std::vector<unsigned char> prior(old_vector[2]);if(!Read(old_vector[0],prior.data(),prior.size())){error="target_st_vector_unreadable";return false;}}
-    reinterpret_cast<void(__thiscall*)(void*,unsigned)>(hd+0x1952c0)(reinterpret_cast<void*>(hd+0x21007a),heroes);
-    std::uint32_t p=0,n=0,cap=0;if(!hp::Read(hd+0x21007a,p)||!p||!hp::Read(hd+0x21007e,n)||n!=heroes||!hp::Read(hd+0x210082,cap)||cap<n){error="native_st_vector_allocation_failed";return false;}
+    reinterpret_cast<void(__thiscall*)(void*,unsigned)>(hd+hp_build::Rva(0x1952c0))(reinterpret_cast<void*>(hd+hp_build::Rva(0x21007a)),heroes);
+    std::uint32_t p=0,n=0,cap=0;if(!hp::Read(hd+hp_build::Rva(0x21007a),p)||!p||!hp::Read(hd+hp_build::Rva(0x21007e),n)||n!=heroes||!hp::Read(hd+hp_build::Rva(0x210082),cap)||cap<n){error="native_st_vector_allocation_failed";return false;}
     //0120FFFA vector and0121007A vector retain native process-owned allocations.
-    if(!Write(hd+0x210006,b.st.data()+12,0x74)||!Write(p,b.hero_assignment.data(),heroes)||
-       !Write(hd+0x210086,b.st.data()+0x8c,16)){error="restore_st_write_failed";return false;}
+    if(!Write(hd+hp_build::Rva(0x210006),b.st.data()+12,0x74)||!Write(p,b.hero_assignment.data(),heroes)||
+       !Write(hd+hp_build::Rva(0x210086),b.st.data()+0x8c,16)){error="restore_st_write_failed";return false;}
     std::array<unsigned char,0x74> plain{};std::array<unsigned char,16> tail{};std::vector<unsigned char> assignment(heroes);
-    if(!Read(hd+0x210006,plain.data(),plain.size())||std::memcmp(plain.data(),b.st.data()+12,plain.size())||
-       !Read(hd+0x210086,tail.data(),tail.size())||std::memcmp(tail.data(),b.st.data()+0x8c,tail.size())||
+    if(!Read(hd+hp_build::Rva(0x210006),plain.data(),plain.size())||std::memcmp(plain.data(),b.st.data()+12,plain.size())||
+       !Read(hd+hp_build::Rva(0x210086),tail.data(),tail.size())||std::memcmp(tail.data(),b.st.data()+0x8c,tail.size())||
        !Read(p,assignment.data(),heroes)||assignment!=b.hero_assignment){error="restored_st_verification_failed";return false;}
     return true;
 }
@@ -139,14 +140,14 @@ bool Authorize(void* context,std::uint32_t token,const hota_resume::Audit& a) no
            !hp::Read(0x69ccfc,player)||player!=a.world+0x20ad0+a.current*0x168||!hp::Read(0x69cd10,mask)||mask!=(1u<<a.current)||
            !hp::Read(0x6977dc,view_owner)||view_owner!=a.local||!hp::Read(0x69cd08,view_mask)||view_mask!=(1u<<a.local)||
            !hp::Read(0x698a10,controlled)||controlled!=(a.players[a.current].local&&a.players[a.current].human?1:0)||
-           !Read(hd+0x210006,plain.data(),plain.size())||std::memcmp(plain.data(),b.st.data()+12,plain.size())||
-           !Read(hd+0x210086,tail.data(),tail.size())||std::memcmp(tail.data(),b.st.data()+0x8c,tail.size()))return false;
+           !Read(hd+hp_build::Rva(0x210006),plain.data(),plain.size())||std::memcmp(plain.data(),b.st.data()+12,plain.size())||
+           !Read(hd+hp_build::Rva(0x210086),tail.data(),tail.size())||std::memcmp(tail.data(),b.st.data()+0x8c,tail.size()))return false;
         for(unsigned c=0;c<8;++c)if(a.players[c].human&&a.players[c].transport_id!=transport.ids[c])return false;
         std::uint32_t queue_count=0,roster=0,hero_vector=0,hero_count=0;
         std::array<unsigned char,187> live_roster{};
-        if(!hp::Read(hd+0x20fffe,queue_count)||queue_count||!hp::Read(hd+0x11b8c84,roster)||!roster||
-           !Read(roster,live_roster.data(),live_roster.size())||!hp::Read(hd+0x21007a,hero_vector)||!hero_vector||
-           !hp::Read(hd+0x21007e,hero_count)||hero_count!=b.hero_assignment.size())return false;
+        if(!hp::Read(hd+hp_build::Rva(0x20fffe),queue_count)||queue_count||!hp::Read(hd+hp_build::Rva(0x11b8c84),roster)||!roster||
+           !Read(roster,live_roster.data(),live_roster.size())||!hp::Read(hd+hp_build::Rva(0x21007a),hero_vector)||!hero_vector||
+           !hp::Read(hd+hp_build::Rva(0x21007e),hero_count)||hero_count!=b.hero_assignment.size())return false;
         auto expected_roster=b.roster;
         for(unsigned i=0;i<expected_roster[0];++i){auto* row=expected_roster.data()+3+i*23;std::memcpy(row,&transport.ids[row[4]],4);}
         if(std::memcmp(live_roster.data(),expected_roster.data(),187))return false;
@@ -205,7 +206,7 @@ bool TryAtAdventureBoundary() noexcept {
         Stage("refresh_native_adventure_ui");
         // Same controls/redraw sequence used by HD's post-rollback world reload.
         // No StartTurn, movement reset, day step, or scenario initialization.
-        reinterpret_cast<void(__cdecl*)()>(hd+0x1753d0)();
+        reinterpret_cast<void(__cdecl*)()>(hd+hp_build::Rva(0x1753d0))();
         reinterpret_cast<void(__thiscall*)(void*,int,int)>(0x417380)(reinterpret_cast<void*>(loaded.after.adventure),1,0);
         Stage("audit_complete_recovery");
         if(!hota_resume::ReleaseAfterRebind(b.token,expected,Authorize,&b,&error))throw std::runtime_error(error);
@@ -261,10 +262,10 @@ void ObserveTurnReturned() noexcept {
             throw std::runtime_error("solo_native_tail_changed_world_day_resources_heroes_or_ownership");
         std::uint32_t network=0,st=0,exit=1,protected_exit=1,merge_failed=1,merge_succeeded=1;
         std::array<hota_completion::Participant,8> rows{};
-        if(!hp::Read(0x69959c,network)||network!=1||!hp::Read(hd+0x210042,st)||st!=1||
-           !hp::Read(hd+0x217508,exit)||exit||!hp::Read(hd+0x2176ec,protected_exit)||protected_exit||
-           !hp::Read(hd+0x210026,merge_failed)||merge_failed||!hp::Read(hd+0x21001a,merge_succeeded)||merge_succeeded||
-           !Read(hd+0x21004a,rows.data(),48)||std::memcmp(rows.data(),completion_rows.data(),48))
+        if(!hp::Read(0x69959c,network)||network!=1||!hp::Read(hd+hp_build::Rva(0x210042),st)||st!=1||
+           !hp::Read(hd+hp_build::Rva(0x217508),exit)||exit||!hp::Read(hd+hp_build::Rva(0x2176ec),protected_exit)||protected_exit||
+           !hp::Read(hd+hp_build::Rva(0x210026),merge_failed)||merge_failed||!hp::Read(hd+hp_build::Rva(0x21001a),merge_succeeded)||merge_succeeded||
+           !Read(hd+hp_build::Rva(0x21004a),rows.data(),48)||std::memcmp(rows.data(),completion_rows.data(),48))
             throw std::runtime_error("solo_native_tail_changed_st_or_human_participation");
         {std::lock_guard<std::mutex> l(mutex);snapshot.completion_tail_audit_passed=true;snapshot.stage="completed_turn_held";}
         // Remain held. Journal persistence and authenticated server checkpoint

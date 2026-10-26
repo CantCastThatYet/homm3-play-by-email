@@ -1,4 +1,5 @@
 #include "world_resume.hpp"
+#include "supported_build.hpp"
 #include "memfile_import.hpp"
 #include "common.hpp"
 #include <atomic>
@@ -118,7 +119,7 @@ bool ValidRoster(const std::vector<std::uint8_t>& roster,const Audit& a) noexcep
 const char* StageRosterFailure(const std::vector<std::uint8_t>& roster) noexcept {
     std::uint32_t destination=0,confirmed=0;std::uint8_t prior[187]{},after[187]{};SIZE_T count=0;
     if(roster.size()!=sizeof prior)return "source_protection_roster_invalid_size";
-    if(!hp::Read(hd+0x11b8c84,destination))return "source_protection_roster_pointer_unreadable";
+    if(!hp::Read(hd+hp_build::Rva(0x11b8c84),destination))return "source_protection_roster_pointer_unreadable";
     if(!destination)return "source_protection_roster_pointer_null";
     const std::uint64_t end=static_cast<std::uint64_t>(destination)+roster.size();
     if(end>0x100000000ull)return "source_protection_roster_range_overflow";
@@ -140,12 +141,12 @@ const char* StageRosterFailure(const std::vector<std::uint8_t>& roster) noexcept
         at=next;
     }
     if(!ReadBytes(destination,prior,sizeof prior))return "source_protection_roster_existing_bytes_unreadable";
-    if(!hp::Read(hd+0x11b8c84,confirmed)||confirmed!=destination)return "source_protection_roster_pointer_changed_before_write";
+    if(!hp::Read(hd+hp_build::Rva(0x11b8c84),confirmed)||confirmed!=destination)return "source_protection_roster_pointer_changed_before_write";
     if(!WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(destination),roster.data(),roster.size(),&count))return "source_protection_roster_write_failed";
     if(count!=roster.size())return "source_protection_roster_short_write";
     if(!ReadBytes(destination,after,sizeof after))return "source_protection_roster_readback_failed";
     if(std::memcmp(after,roster.data(),sizeof after))return "source_protection_roster_readback_mismatch";
-    if(!hp::Read(hd+0x11b8c84,confirmed)||confirmed!=destination)return "source_protection_roster_pointer_changed_after_write";
+    if(!hp::Read(hd+hp_build::Rva(0x11b8c84),confirmed)||confirmed!=destination)return "source_protection_roster_pointer_changed_after_write";
     return nullptr;
 }
 bool WriteLocalOwner(int color) noexcept {
@@ -200,8 +201,10 @@ bool WrapperSignature(std::uint32_t base) noexcept {
         0xc7,0x45,0xf8,0,0,0,0,0xb8,0xf0,0xef,0x4b,0,0x8b,0x0d,0x38,0x95,0x69,0,0x56,0xff,0xd0,
         0xbe,0x60,0x83,0x55,0,0x8d,0x4d,0xec,0xff,0xd6,0x8d,0x4d,0xec,0xc7,0x45,0xf8,0xff,0xff,0xff,0xff,
         0xff,0xd6,0x8b,0x4d,0xfc,0x33,0xcd,0x5e,0xe8,0xbd,0x60,0x12,0,0x8b,0xe5,0x5d,0xc3};
-    const std::uint32_t cookie=base+0x20e068;std::memcpy(expected+7,&cookie,4);
-    return Bytes(base+0x9ef00,expected,sizeof expected);
+    const std::uint32_t cookie=base+hp_build::Rva(0x20e068);std::memcpy(expected+7,&cookie,4);
+    // Bytes 85..88 are the relative call to the cookie check, which moves between HD builds.
+    const std::uint32_t at=base+hp_build::Rva(0x9ef00);
+    return expected[84]==0xe8&&Bytes(at,expected,85)&&Bytes(at+89,expected+89,sizeof expected-89);
 }
 // Small isolated SEH boundary: a fault is reported, never interpreted as rollback.
 bool InvokeInner(std::uint32_t address) noexcept {
@@ -371,7 +374,7 @@ bool TryAtAdventureBoundary() noexcept {
         result.status=Status::Loading;result.load_calls_before=load_calls;result.load_returns_before=load_returns;
         {std::lock_guard<std::mutex> lock(mutex);snapshot=result;}
         loading_world=result.before.world;last_load_match=false;last_load_result=0;result.load_invoked=true;
-        const bool returned=InvokeInner(hd+0x9ef00);
+        const bool returned=InvokeInner(hd+hp_build::Rva(0x9ef00));
         result.load_calls_after=load_calls;result.load_returns_after=load_returns;
         result.load_balanced=load_calls==result.load_calls_before+1&&load_returns==result.load_returns_before+1&&!load_depth;
         result.load_success=returned&&result.load_balanced&&last_load_match&&last_load_result!=0;

@@ -1,4 +1,5 @@
 #include "completed_leave.hpp"
+#include "supported_build.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -26,7 +27,7 @@ bool Read(std::uintptr_t at,void* out,std::size_t size) noexcept {
     SIZE_T n=0;return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n)&&n==size;
 }
 template<class T>bool Read(std::uintptr_t at,T& out) noexcept{return Read(at,&out,sizeof out);}
-std::uintptr_t HD(std::uint32_t at) noexcept{return hd+at-0x1000000;}
+std::uintptr_t HD(std::uint32_t at) noexcept{return hd+hp_build::Rva(at-0x1000000);}
 bool Bytes(std::uintptr_t at,const unsigned char* expected,std::size_t size) noexcept {
     unsigned char actual[32]{};return size<=sizeof actual&&Read(at,actual,size)&&!std::memcmp(actual,expected,size);
 }

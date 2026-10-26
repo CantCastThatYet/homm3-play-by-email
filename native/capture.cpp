@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "capture.hpp"
+#include "supported_build.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
@@ -42,7 +43,7 @@ public:
         return bytes(address, &output, sizeof output);
     }
     std::uintptr_t hd(std::uint32_t address) const {
-        return relocate(request_.hd_base, address - kHdPreferred);
+        return relocate(request_.hd_base, hp_build::Rva(address - kHdPreferred));
     }
     std::uintptr_t engine(std::uint32_t address) const {
         return relocate(request_.engine_base, address - kEnginePreferred);

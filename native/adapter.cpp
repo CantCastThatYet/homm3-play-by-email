@@ -118,13 +118,13 @@ void AddRecoveryAudit(hota_capture::CaptureEnvelope& envelope,const hota_resume:
         throw std::runtime_error("world_changed_during_checkpoint_serialization:"+error);
     envelope.native_world_audit=hota_resume::EncodeAudit(after);
     unsigned roster=0;
-    if(!hp::Read(hdBase.load()+0x11b8c84,roster)||!roster)throw std::runtime_error("native_roster_unavailable");
+    if(!hp::Read(hdBase.load()+hp_build::Rva(0x11b8c84),roster)||!roster)throw std::runtime_error("native_roster_unavailable");
     envelope.hd_roster.resize(187);SIZE_T got=0;
     if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(roster),envelope.hd_roster.data(),187,&got)||got!=187)
         throw std::runtime_error("native_roster_unreadable");
     unsigned assignments=0,count=0,capacity=0;
-    if(!hp::Read(hdBase.load()+0x21007a,assignments)||!hp::Read(hdBase.load()+0x21007e,count)||
-       !hp::Read(hdBase.load()+0x210082,capacity)||count<1||count>4096||capacity<count||capacity>4096||!assignments)
+    if(!hp::Read(hdBase.load()+hp_build::Rva(0x21007a),assignments)||!hp::Read(hdBase.load()+hp_build::Rva(0x21007e),count)||
+       !hp::Read(hdBase.load()+hp_build::Rva(0x210082),capacity)||count<1||count>4096||capacity<count||capacity>4096||!assignments)
         throw std::runtime_error("native_hero_assignment_layout_mismatch");
     envelope.hero_assignments.resize(count);
     if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(assignments),envelope.hero_assignments.data(),count,&got)||got!=count)
@@ -237,8 +237,6 @@ void CaptureCompletion(const hota_completion::Snapshot& snapshot, void*) noexcep
     }
 }
 
-const auto& builds = hp_build::Files;
-
 void CheckBuild() {
     if (fingerprintAccepted.load()) return;
     HMODULE modules[256]{}; DWORD bytes = 0;
@@ -246,24 +244,35 @@ void CheckBuild() {
     std::wstring root = hp::Canonical(hp::Parent(hp::ModulePath(nullptr)), true);
     bool accepted = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)) == 0x400000;
     std::string reason = accepted ? "not_ready" : "unsupported_engine_base";
-    std::ostringstream out; out << '[';
-    for (size_t r = 0; r < _countof(hp_build::Files); ++r) {
-        HMODULE found = nullptr; std::wstring path;
+    // The loaded module by file name (HD loads HotA.dll from its _181fix copy).
+    auto loaded = [&](const wchar_t* name, std::wstring& path) -> HMODULE {
         for (DWORD i = 0; i < bytes / sizeof(HMODULE); ++i) {
             auto p = hp::ModulePath(modules[i]); auto basename = p.substr(p.find_last_of(L"\\/") + 1);
-            if (_wcsicmp(basename.c_str(), builds[r].module) == 0 ||
-                (r == 5 && _wcsicmp(basename.c_str(), L"HotA.dll_181fix") == 0)) { found = modules[i]; path = hp::Canonical(p); break; }
+            if (_wcsicmp(basename.c_str(), name) == 0 ||
+                (_wcsicmp(name, L"HotA.dll") == 0 && _wcsicmp(basename.c_str(), L"HotA.dll_181fix") == 0)) { path = hp::Canonical(p); return modules[i]; }
         }
+        return nullptr;
+    };
+    // HD_HOTA.dll says which HD build this is; the other files must be that build's and HotA's own.
+    const hp_build::Hd* hd = nullptr;
+    { std::wstring path; if (loaded(L"HD_HOTA.dll", path)) hd = hp_build::FindHd(hp::Sha256(path).c_str()); }
+    const auto& expected = hd ? *hd : hp_build::HdBuilds[_countof(hp_build::HdBuilds) - 1];
+    const hp_build::File* files[] = {&hp_build::Game[0], &expected.files[0], &expected.files[1], &expected.files[2], &expected.files[3], &hp_build::Game[1]};
+    std::ostringstream out; out << '[';
+    for (size_t r = 0; r < _countof(files); ++r) {
+        std::wstring path; const HMODULE found = loaded(files[r]->module, path);
         std::string hash = found ? hp::Sha256(path) : "";
-        bool match = found && hp::Within(path, root) && hash == builds[r].sha256;
+        bool match = found && hp::Within(path, root) && hash == files[r]->sha256;
         if (!match) { accepted = false; reason = found ? "fingerprint_mismatch" : "modules_not_ready"; }
         if (r) out << ',';
-        out << "{\"name\":" << hp::Json(hp::Utf8(builds[r].module)) << ",\"path\":" << hp::Json(hp::Utf8(path))
-            << ",\"sha256\":" << hp::Json(hash) << ",\"expectedSha256\":" << hp::Json(builds[r].sha256)
+        out << "{\"name\":" << hp::Json(hp::Utf8(files[r]->module)) << ",\"path\":" << hp::Json(hp::Utf8(path))
+            << ",\"sha256\":" << hp::Json(hash) << ",\"expectedSha256\":" << hp::Json(files[r]->sha256)
             << ",\"matched\":" << (match ? "true" : "false") << '}';
         if (r == 1 && match) hdBase.store(reinterpret_cast<std::uintptr_t>(found));
     }
     out << ']';
+    // Every HD_HOTA.dll address the patch uses is translated for this build from here on.
+    if (accepted && hd) hp_build::current.store(hd);
     // A launcher-owned copy carries a marker; the game patch runs in the player's own installation.
     if (patchMode.load()) {
         std::lock_guard<std::mutex> lock(stateMutex);
@@ -321,7 +330,7 @@ void CaptureCurrentAtBoundary() noexcept {
         if(!hota_resume::ReadAudit(audit,&error))throw std::runtime_error(error);
         if(audit.local!=audit.current)return;
         unsigned char row[6]{};
-        if(!hp::Read(hdBase.load()+0x21004a+audit.local*6,row)||!row[3]||row[1])
+        if(!hp::Read(hdBase.load()+hp_build::Rva(0x21004a)+audit.local*6,row)||!row[3]||row[1])
             throw std::runtime_error("checkpoint_requires_unfinished_local_simultaneous_turn");
         currentCaptureRequested.store(false);pendingCaptureAudit=std::move(audit);auditedCapturePending=true;
         captureRequested.store(true);
@@ -422,7 +431,7 @@ LRESULT CALLBACK InstallOnGameThread(int code, WPARAM wparam, LPARAM lparam) {
                     hooks[0] = instance->WriteHiHook(0x4BEB60, SPLICE_, EXTENDED_, THISCALL_, reinterpret_cast<void*>(SaveHook));
                     hooks[1] = instance->WriteHiHook(0x4BEFF0, SPLICE_, EXTENDED_, THISCALL_, reinterpret_cast<void*>(LoadHook));
                     hooks[2] = instance->WriteHiHook(0x4C6CA0, SPLICE_, EXTENDED_, THISCALL_, reinterpret_cast<void*>(TurnHook));
-                    hooks[3] = instance->WriteHiHook(hdBase.load()+0x11ea90, SPLICE_, EXTENDED_, CDECL_, reinterpret_cast<void*>(MergeFrameHook));
+                    hooks[3] = instance->WriteHiHook(hdBase.load()+hp_build::Rva(0x11ea90), SPLICE_, EXTENDED_, CDECL_, reinterpret_cast<void*>(MergeFrameHook));
                     hooks[4] = instance->WriteHiHook(0x4CBA00, SPLICE_, EXTENDED_, STDCALL_, reinterpret_cast<void*>(ReceiveFrameHook));
                 }
                 bool good = true; for (unsigned i=0;i<5;++i) good = good && hooks[i] && hooks[i]->IsApplied();
@@ -457,7 +466,7 @@ LRESULT CALLBACK InstallOnGameThread(int code, WPARAM wparam, LPARAM lparam) {
                 }
                 if (good && patchMode.load()) {
                     std::string lobbyError;
-                    HiHook* pvp = instance->WriteHiHook(hdBase.load()+0x184550, SPLICE_, EXTENDED_, CDECL_, reinterpret_cast<void*>(PvpOptionsHook));
+                    HiHook* pvp = instance->WriteHiHook(hdBase.load()+hp_build::Rva(0x184550), SPLICE_, EXTENDED_, CDECL_, reinterpret_cast<void*>(PvpOptionsHook));
                     if (!pvp || !pvp->IsApplied()) lobbyError = "pvp_options_hook_failed";
                     if (!hp_lobby::Install(hdBase.load(), &lobbyError) || !lobbyError.empty()) { std::lock_guard<std::mutex> lock(stateMutex); hookError = lobbyError; }
                 }
@@ -517,12 +526,12 @@ std::string Probe() {
     unsigned char stRows[8][6]{};
     if(supported) {
         hp::Read(0x6aad88,modalDepth); hp::Read(0x6987c8,moveReminder);
-        hp::Read(hdBase.load()+0x21004a,stRows);
-        hp::Read(hdBase.load()+0x217508,exitPending); hp::Read(hdBase.load()+0x2176ec,protectedExit);
+        hp::Read(hdBase.load()+hp_build::Rva(0x21004a),stRows);
+        hp::Read(hdBase.load()+hp_build::Rva(0x217508),exitPending); hp::Read(hdBase.load()+hp_build::Rva(0x2176ec),protectedExit);
     }
     unsigned map = 0, scenario = 1, simultaneous = 0;
     const bool mapPresent = mainRead && hp::Read(main + 0x1fc40, map) && map != 0;
-    if (supported) { hp::Read(0x69fc44, scenario); if (hdBase.load()) hp::Read(hdBase.load() + 0x210042, simultaneous); }
+    if (supported) { hp::Read(0x69fc44, scenario); if (hdBase.load()) hp::Read(hdBase.load()+hp_build::Rva(0x210042), simultaneous); }
     // The combat manager's state is 1 from the start of a battle until its result dialog closes.
     unsigned combatManager = 0, combatState = 0;
     const bool combat = supported && hp::Read(0x699420, combatManager) && combatManager && hp::Read(combatManager + 0x34, combatState) && combatState == 1;

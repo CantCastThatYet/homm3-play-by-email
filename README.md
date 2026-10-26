@@ -111,6 +111,23 @@ Checked 2026-10-26 on a copy of a real HotA 1.8.1 installation:
 - Uninstalling from the copy in the HotA folder removed every Heroes Post file, that copy included.
 - Not tested: the request for administrator rights, and the release workflow.
 
+### When HotA or HD Mod updates
+
+The patch works only with the HotA and HD Mod builds in `native/supported_build.hpp`; with any other it stays off, and the installer says which files differ. HD Mod updates itself often, and every update moves code and data inside `HD_HOTA.dll`, where the patch hooks and reads. The code names each of those addresses as it is in HD 5.8 R22 and passes it through `hp_build::Rva()`, which translates it for the running build. To support a new HD build:
+
+1. Keep the previous build's `HD_HOTA.dll` and get the new one.
+2. Run `python native/tools/hd_port.py OLD/HD_HOTA.dll NEW/HD_HOTA.dll <addresses>`. It finds each address in the new build: code by its bytes (with relocated words and call offsets masked) or through all its callers, data through every instruction that refers to it. It marks anything without a unique answer for review.
+3. Add a `Move` table and the build's file hashes to `native/supported_build.hpp`, and its hashes to `NativeBridge.HdBuilds`.
+4. Play a game with Continue on the new build before releasing; byte checks and data layouts can change as well as addresses.
+
+Checked 2026-10-26 for HD 5.8 R24, which moved 18 functions and 10 data areas, including the whole simultaneous-turn block by 0x24 bytes:
+- Two R24 HotAs played a game with simultaneous turns and a day change.
+- One left and came back with Continue, and both reached day 3 with identical games.
+- R22 still works.
+- Two things besides addresses changed in R24. HD's operator new and delete now go through pointers HD sets at start. Its memory files no longer carry R22's allocator tag. Both are per-build entries now.
+
+Players with a fresh HotA 1.8.1 from the official installer have the August `HotA.dll` and HD 5.8 R7. The installer tells them to update through HotA's launcher. That is how the test machine got its builds; it has not been checked on a fresh install.
+
 ## Build desktop packages
 
 For a regular self-contained package, build on the target platform and choose its runtime identifier (`win-x64`, `linux-x64`, `osx-arm64`, etc.):

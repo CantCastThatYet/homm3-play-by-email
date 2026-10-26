@@ -1,4 +1,5 @@
 #include "adventure_actions.hpp"
+#include "supported_build.hpp"
 #include "common.hpp"
 #include "vendor/patcher_x86.hpp"
 #include <atomic>
@@ -61,10 +62,10 @@ Error Guard(std::uint32_t self,std::uint32_t& dialog) noexcept {
     WORD date[3]{};
     if(!hp::Read(world+0x1f63e,date)||date[0]!=request.day||date[1]!=request.week||date[2]!=request.month)return Error::Date;
     int enabled=0,barrier=0,ack=0,stop=0;unsigned char participant[6]{};
-    if(!hp::Read(hd+0x210042,enabled)||!enabled||!hp::Read(hd+0x21004a+local*6,participant)||
+    if(!hp::Read(hd+hp_build::Rva(0x210042),enabled)||!enabled||!hp::Read(hd+hp_build::Rva(0x21004a)+local*6,participant)||
        !participant[3]||participant[1]||
-       !hp::Read(hd+0x21001e,barrier)||barrier||!hp::Read(hd+0x210022,ack)||ack||
-       !hp::Read(hd+0x21002e,stop)||stop)return Error::SimultaneousState;
+       !hp::Read(hd+hp_build::Rva(0x21001e),barrier)||barrier||!hp::Read(hd+hp_build::Rva(0x210022),ack)||ack||
+       !hp::Read(hd+hp_build::Rva(0x21002e),stop)||stop)return Error::SimultaneousState;
     return Error::None;
 }
 unsigned __stdcall MessageHook(HiHook* chain,std::uint32_t self,Message* message) {

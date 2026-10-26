@@ -1,4 +1,5 @@
 #include "solo_transport.hpp"
+#include "supported_build.hpp"
 #include "solo_journal.hpp"
 #include "dplay_relay.hpp"
 #include "common.hpp"
@@ -81,7 +82,7 @@ bool ActivateAtBoundary(std::uint32_t token,std::uint32_t world,int local,int cu
         std::uint32_t w=0,net=0,network=0,dpid=0,roster=0;
         if(!state.installed||state.active||GetCurrentThreadId()!=thread_id||!token||local<0||local>7||current<0||current>7||!(mask&(1u<<local))||
            !hp::Read(0x699538,w)||w!=world||!hp::Read(0x69d858,net)||!net||!hp::Read(0x69959c,network)||network!=1||
-           !hp::Read(0x69d658,dpid)||!dpid||!hp::Read(hd+0x11b8c84,roster)||!roster){Error(e,"solo_transport_activation_state");return false;}
+           !hp::Read(0x69d658,dpid)||!dpid||!hp::Read(hd+hp_build::Rva(0x11b8c84),roster)||!roster){Error(e,"solo_transport_activation_state");return false;}
         std::array<std::uint32_t,8> ids{};unsigned human_count=0;
         for(int c=0;c<8;++c)if(mask&(1u<<c)){
             ++human_count;ids[c]=c==local?dpid:0x7f010000u|static_cast<unsigned>(c);
@@ -111,8 +112,8 @@ bool ActivateAtBoundary(std::uint32_t token,std::uint32_t world,int local,int cu
             if(!Write(world+0x20b98+c*0x168,ids[c])){Fault("solo_world_identity_write");return false;}
         }
         if(!Write(roster,r.data(),r.size())||!Write(0x6995a4,local)){Fault("solo_roster_write");return false;}
-        for(unsigned i=0;i<8;++i){int color=-1;const auto record=hd+0x2170d0+i*0x7c;if(!hp::Read(record+0x70,color)){Fault("solo_peer_table_read");return false;}if(color>=0&&color<8&&(mask&(1u<<color)))if(!Write(record,ids[color])){Fault("solo_peer_table_write");return false;}}
-        reinterpret_cast<void(__stdcall*)(int)>(hd+0x2880)(current);
+        for(unsigned i=0;i<8;++i){int color=-1;const auto record=hd+hp_build::Rva(0x2170d0)+i*0x7c;if(!hp::Read(record+0x70,color)){Fault("solo_peer_table_read");return false;}if(color>=0&&color<8&&(mask&(1u<<color)))if(!Write(record,ids[color])){Fault("solo_peer_table_write");return false;}}
+        reinterpret_cast<void(__stdcall*)(int)>(hd+hp_build::Rva(0x2880))(current);
         // Native network-load00589DF0 uses local color for fog/view ownership,
         // independently of the current turn color restored by01002880.
         const unsigned view_mask=1u<<local;

@@ -1,4 +1,5 @@
 #include "scenario_start.hpp"
+#include "supported_build.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -32,7 +33,7 @@ bool Read(std::uintptr_t p,void* value,SIZE_T n) noexcept {
         ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(p),value,n,&got)&&got==n;
 }
 template<class T> bool Read(std::uintptr_t p,T& v) noexcept {return Read(p,&v,sizeof v);}
-std::uintptr_t HD(std::uint32_t p) noexcept {return state.hd+(p-0x01000000);}
+std::uintptr_t HD(std::uint32_t p) noexcept {return state.hd+hp_build::Rva(p-0x01000000);}
 void Detail(const char* v) noexcept {strncpy_s(state.snapshot.detail,v,_TRUNCATE);}
 void Publish(Status status,const char* detail=nullptr) noexcept {
     state.snapshot.status=status;
