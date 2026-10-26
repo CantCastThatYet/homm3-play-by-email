@@ -51,7 +51,7 @@ Linux specifics, checked 2026-10-26 with the image on Ubuntu 24.04 and two HotAs
 
 Keep in mind:
 - **Relay port:** the relay must be reachable directly on the same port number the server listens on (`Relay__Port`), because the server tells clients its own port. It is plain TCP, not HTTP, so it does not go through a reverse proxy. It is also not encrypted, including the sign-in token it carries.
-- **No stand-ins:** stand-ins need Windows and prepared HotA copies, so on Linux nobody plays an away player's seat. The turn limit is not enforced either. The others wait until that player continues. Change `Lobby__Name` to name your community. `docker compose down` retains the volume; adding `-v` deletes it.
+- **No stand-ins:** stand-ins need Windows and prepared HotA copies, so on Linux nobody plays an away player's seat. The turn limit is not enforced either. The others wait until that player continues. A day still changes without everyone online at once: checked 2026-10-26, both players ended day 3 and quit, the host continued alone and its game waited, then the other player continued and both reached day 4 with identical worlds. That needs patch 0.1.2 or later; with 0.1.1, a host who ended the turn and left before the last player ended it stayed on the old day after Continue. The host leaving again before the others return has not been tried. Change `Lobby__Name` to name your community. `docker compose down` retains the volume; adding `-v` deletes it.
 
 Without Docker:
 

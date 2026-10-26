@@ -360,6 +360,7 @@ public class RelayHubTests
         hub.Handle(back, Body(new FrameWriter(RelayProtocol.CreatePlayer).U32(2).U32(RelayProtocol.PlayerServer).Str("HeroesPost").Str("HeroesPost").Blob([])));
         var reply = back.Of(RelayProtocol.Reply).Last().Reader; reply.U32(); reply.U32();
         Assert.Equal((blueId, 1u, 1u), (reply.U32(), reply.U32(), reply.U32())); // seat, generation, frames replayed
+        Assert.Equal(0u, reply.U32()); // of which answered: none, it was sent while Blue was away
         // Working through the replay, the engine repeats the day's end its own way and announces itself.
         Send(hub, back, blueId, 0, Message(GameMessage.Simultaneous, blueId));
         Send(hub, back, blueId, 0, Message(GameMessage.LoadGame, blueId));
@@ -370,6 +371,52 @@ public class RelayHubTests
         Send(hub, back, blueId, redId, Message(GameMessage.LoadReceipt, blueId));
         Assert.Equal([GameMessage.LoadReceipt], Delivered(red).Skip(before));
         Assert.Equal(5, hub.Games().Single().Seats.Single(s => s.Id == blueId).Sent);
+    }
+
+    [Fact]
+    public void AClaimLearnsWhichReplayedFramesTheSeatHadAnswered()
+    {
+        var directory = TemporaryDirectory();
+        try
+        {
+            var state = State(directory);
+            var (hub, red, blue, redId, blueId) = StartedAccountGame(state);
+            Send(hub, red, redId, blueId, Message(GameMessage.Simultaneous, redId));
+            Send(hub, red, redId, blueId, Message(GameMessage.Simultaneous, redId));
+            var answered = hub.Games().Single().Seats.Single(s => s.Id == blueId).Delivered;
+            hub.Disconnected(blue);
+            // Red ends the day while Blue is away; the server restarts before Blue continues.
+            Send(hub, red, redId, blueId, Message(GameMessage.Simultaneous, redId));
+            state.Close();
+            var restarted = AccountHub(State(directory));
+
+            // Blue's capture had consumed one frame fewer than it was sent before leaving.
+            uint Claim(Peer peer, uint from, uint request)
+            {
+                Hello(restarted, peer, "blue-token");
+                restarted.Handle(peer, Body(new FrameWriter(RelayProtocol.Rejoin).U32(request).Str("Game").Str("Blue").U32(from).U32(1)));
+                restarted.Handle(peer, Body(new FrameWriter(RelayProtocol.CreatePlayer).U32(request + 1).U32(RelayProtocol.PlayerServer).Str("HeroesPost").Str("HeroesPost").Blob([])));
+                var reply = peer.Of(RelayProtocol.Reply).Last().Reader; reply.U32(); reply.U32();
+                Assert.Equal(blueId, reply.U32()); reply.U32();
+                Assert.Equal((uint)(answered + 1 - from), reply.U32());
+                return reply.U32();
+            }
+            var from = (uint)answered - 1;
+            var back = new Peer("blue-back");
+            Assert.Equal(1u, Claim(back, from, 1)); // the frame before it left, not Red's End Turn
+
+            // An older client says CaughtUp without the field: it took Red's End Turn while its answers were discarded.
+            restarted.Handle(back, Body(new FrameWriter(RelayProtocol.CaughtUp)));
+            restarted.Disconnected(back);
+            var again = new Peer("blue-again");
+            Assert.Equal(1u, Claim(again, from, 3));
+
+            // A newer client held Red's End Turn back until it had caught up, so its answer was heard.
+            restarted.Handle(again, Body(new FrameWriter(RelayProtocol.CaughtUp).U32(from + 1)));
+            restarted.Disconnected(again);
+            Assert.Equal(2u, Claim(new Peer("blue-third"), from, 5));
+        }
+        finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
     }
 
     [Fact]

@@ -314,7 +314,29 @@ int main(int argc, char** argv) {
     got = WaitGame(keeper);
     Check(got.hr == S_OK && got.from == returnedId && got.data.size() == sizeof fresh && std::memcmp(got.data.data(), fresh, sizeof fresh) == 0,
           "its next message reaches the other player");
-    keeper->Release(); returned->Release();
+
+    // It leaves again, and the other player sends while the seat is away (the last End Turn of a
+    // day, which the ST head answers by starting the day change). The next process takes that frame
+    // only once it has caught up, so its answer is delivered instead of discarded as a repeat.
+    returned->Close(); returned->Release();
+    char late[] = "late"; keeper->Send(keeperId, 0, 1, late, sizeof late);
+    Sleep(300);
+    continuing.rejoin_from = 1; continuing.rejoin_sent = 1;
+    hp_relay::CreateDirectPlay(continuing, &raw); auto again = static_cast<IDP4*>(raw);
+    again->InitializeConnection(address.data(), 0);
+    Check(SUCCEEDED(again->Open(&third, 2)), "the player continues again");
+    DPID againId = 0;
+    Check(SUCCEEDED(again->CreatePlayer(&againId, &pn, nullptr, nullptr, 0, 0)) && againId == leaverId && hp_relay::CatchingUp(),
+          "the seat is claimed back again");
+    Check(WaitGame(again, 3000).hr == NoMessages && hp_relay::CatchingUp(), "the frame sent while it was away waits while it catches up");
+    got = WaitGame(again, 6000);
+    Check(got.hr == S_OK && !hp_relay::CatchingUp() && got.from == keeperId && got.data.size() == sizeof late && std::memcmp(got.data.data(), late, sizeof late) == 0,
+          "it gets that frame once it has caught up");
+    char answer[] = "answer"; again->Send(againId, keeperId, 1, answer, sizeof answer);
+    got = WaitGame(keeper);
+    Check(got.hr == S_OK && got.from == againId && got.data.size() == sizeof answer && std::memcmp(got.data.data(), answer, sizeof answer) == 0,
+          "its answer reaches the other player");
+    keeper->Release(); again->Release();
 
     peer->Release(); host->Release(); lobby->Release();
     std::printf(failures ? "%d FAILED\n" : "ALL PASSED\n", failures);

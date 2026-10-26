@@ -363,6 +363,39 @@ day stuck. Checked 2026-10-26 with two patched HotAs and accounts:
 - `Native.RelayTest` covers the case without a game: a seat claimed back with nothing to replay
   catches up while only polling; its message from before is not delivered and its next one is.
 
+### Frames the seat never answered wait until it has caught up
+
+Dropping everything a catching-up process sends is right only for the replayed frames the seat had
+already answered. A day stuck on 2026-10-26 on the Linux server (no stand-ins): Red (the host and ST
+head) ended day 1 and quit. Blue then ended it too. The completion capture is taken inside HD's End
+Turn, and a resumed seat answers the day barrier but does not start it. The head starts the day
+change when the last player's End Turn (`0x8A2`, `0x1001`) reaches it. On Continue, Red worked
+through Blue's 36 frames during the catch-up window. Its start of the day change (`0x8A2/0`, 28 B)
+was discarded with the `0x8A4` announcement. Red's game then showed both players done on day 1, and
+Blue waited with "Current player is... Red". The earlier host-leaves run passed only because the
+stand-in claimed the seat before Blue ended the day.
+
+Now the relay keeps, per seat, how many delivered frames the other players heard the seat answer
+(`Heard`): frames posted to a live owner that was not catching up. It is saved with the seat;
+records from before it existed count every frame. The CreatePlayer reply for a claimed seat adds
+how many of the replayed frames were answered. During catch-up the client gives its engine only
+those. The rest, sent while the seat was away or arriving now, waits until `CaughtUp` is sent. The
+five-second timer starts once the answered frames are consumed. `CaughtUp` now carries the frame
+count where holding began. That tells the relay the client held the rest back, so it counts every
+delivered frame as answered. Without the field (patch 0.1.1), it counts none of them.
+
+Checked 2026-10-26 with two R24 HotAs and a local server without stand-ins:
+
+- Red ended day 1 and quit, and Blue ended it. Red continued with 3 frames, all new. The relay
+  discarded only `0x8A4`, delivered the day-change start, and both reached day 2. Both ended day 2
+  and reached day 3 with identical worlds.
+- Both ended day 3 and quit. Red continued alone: it caught up, started the day change and waited.
+  Blue continued (1 new frame) and both reached day 4 with identical resources, heroes, armies and
+  monsters.
+- `Native.RelayTest`: a frame sent while the seat was away is held until the seat has caught up,
+  and the answer to it is delivered. Server tests cover the answered count across a restart, and
+  `CaughtUp` with and without the field.
+
 ### Seat saving in the patch
 
 `native/seat_keeper.cpp` does what the app's `SeatKeeper` did, inside the game:

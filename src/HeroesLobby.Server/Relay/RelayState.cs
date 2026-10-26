@@ -41,7 +41,7 @@ public sealed class RelayState
             var record = new SavedSession(session.Info.Instance, session.Info.Application, session.Info.Flags, session.Info.MaxPlayers,
                 session.Info.Name, session.Info.Password, session.Info.User, session.TurnSeconds, HostSeat(session),
                 session.Entities.Values.Select(e => new SavedEntity(e.Id, e.Group, e.Flags, e.Parent, e.Short, e.Long, e.Data, [.. e.Members], [.. e.Subgroups],
-                    e.Account, e.AwaySince, e.Generation)).ToList());
+                    e.Account, e.AwaySince, e.Generation, e.Heard)).ToList());
             var path = Path.Combine(folder, "session.json");
             var temporary = path + ".pending";
             File.WriteAllBytes(temporary, JsonSerializer.SerializeToUtf8Bytes(record, RelayStateJson.Default.SavedSession));
@@ -130,6 +130,8 @@ public sealed class RelayState
                     };
                     entity.Members.AddRange(e.Members); entity.Subgroups.AddRange(e.Subgroups);
                     if (!e.Group) ReadLog(Path.Combine(folder, $"{e.Id:x8}.log"), entity);
+                    // Records from before Heard was kept count every frame as answered, as the relay then assumed.
+                    entity.Heard = Math.Min(e.Heard ?? entity.Delivered.Count, entity.Delivered.Count);
                     session.Entities[e.Id] = entity;
                 }
                 // The host role stays with the host's seat until someone reclaims it.
@@ -171,7 +173,7 @@ public sealed class RelayState
 }
 
 public sealed record SavedEntity(uint Id, bool Group, uint Flags, uint Parent, string Short, string Long, byte[] Data, uint[] Members, uint[] Subgroups,
-    string? Account, DateTimeOffset? AwaySince, uint Generation = 0);
+    string? Account, DateTimeOffset? AwaySince, uint Generation = 0, int? Heard = null);
 public sealed record SavedSession(Guid Instance, Guid Application, uint Flags, uint MaxPlayers, string Name, string Password, uint[] User,
     int? TurnSeconds, uint? HostSeat, List<SavedEntity> Entities);
 

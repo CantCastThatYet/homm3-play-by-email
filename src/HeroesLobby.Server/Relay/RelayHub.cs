@@ -26,6 +26,13 @@ public sealed class RelayEntity
     /// <summary>The seat's messages its current process accounts for: the index of its next message.</summary>
     public int Sent { get; set; }
     /// <summary>
+    /// How many of Delivered the other players have heard the seat answer: frames posted to a live
+    /// owner that was not catching up. A claiming process may work through only these during its
+    /// catch-up, since its answers then are discarded; it holds later ones (the last End Turn of a
+    /// day, which the ST head answers by starting the day change) until it has caught up.
+    /// </summary>
+    public int Heard { get; set; }
+    /// <summary>
     /// A process that claimed the seat from a capture first works through the relay's replay. On the
     /// way it repeats part of what the seat did after the capture, often not byte for byte (a world
     /// transfer is serialised anew), and announces itself (current player, simultaneous-turn state).
@@ -165,10 +172,14 @@ public sealed class RelayHub
             case RelayProtocol.Rejoin: Rejoin(peer, r); return;
             case RelayProtocol.Resume: Resume(peer, r); return;
             case RelayProtocol.CaughtUp:
+                // Clients that hold back unheard frames during catch-up say from where; their
+                // engine takes the rest after this, so its answers to them are delivered.
+                var held = r.Remaining >= 4;
                 if (Member(peer, out var current))
                     foreach (var seat in current.Entities.Values.Where(e => !e.Group && e.Owner == peer && e.CatchingUp))
                     {
                         seat.CatchingUp = false;
+                        if (held) seat.Heard = seat.Delivered.Count;
                         logger.LogInformation("Relay seat {Id:x8} '{Seat}' in {Session} has caught up; its messages are new from here", seat.Id, seat.Short, current.Info.Name);
                     }
                 return;
@@ -318,6 +329,7 @@ public sealed class RelayHub
             peer.Label, seat.Id, seat.Short, session.Info.Name, received, seat.Delivered.Count, seat.Sent);
         Reply(peer, request, RelayProtocol.Ok, w => w.U32((uint)seat.Sent));
         foreach (var frame in seat.Delivered.Skip((int)received)) peer.Post(frame);
+        if (!seat.CatchingUp) seat.Heard = seat.Delivered.Count;
     }
 
     private bool Member(IRelayPeer peer, out RelaySession session) => membership.TryGetValue(peer, out session!);
@@ -349,8 +361,12 @@ public sealed class RelayHub
             // The new process counts the seat's messages from its capture.
             if (claim.Sent is { } sent) { seat.Sent = sent; state?.Sent(session, seat); }
             seat.CatchingUp = true; seat.CatchUpUntil = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(3);
-            Reply(peer, request, RelayProtocol.Ok, w => w.U32(seat.Id).U32(seat.Generation).U32((uint)Math.Max(0, seat.Delivered.Count - claim.From)));
-            logger.LogInformation("Relay seat {Id:x8} '{Name}' in {Session} reclaimed by {Peer}; replaying messages {From}..{Count}", seat.Id, seat.Short, session.Info.Name, peer.Label, claim.From, seat.Delivered.Count);
+            // Replayed frames the seat's answers were heard for come first; the rest are new to the game.
+            var replay = Math.Max(0, seat.Delivered.Count - claim.From);
+            var heard = Math.Clamp(seat.Heard - claim.From, 0, replay);
+            Reply(peer, request, RelayProtocol.Ok, w => w.U32(seat.Id).U32(seat.Generation).U32((uint)replay).U32((uint)heard));
+            logger.LogInformation("Relay seat {Id:x8} '{Name}' in {Session} reclaimed by {Peer}; replaying messages {From}..{Count}, answered up to {Heard}",
+                seat.Id, seat.Short, session.Info.Name, peer.Label, claim.From, seat.Delivered.Count, seat.Heard);
             foreach (var frame in seat.Delivered.Skip(claim.From)) peer.Post(frame);
             return;
         }
@@ -438,6 +454,7 @@ public sealed class RelayHub
         {
             var frame = new FrameWriter(RelayProtocol.Deliver).U32(from).U32(recipient.Id).Blob(data).Finish();
             if (recipient.Delivered.Count < RelayEntity.DeliveredLimit) { recipient.Delivered.Add(frame); state?.Delivered(session, recipient, frame); }
+            if (recipient.Owner is not AwaySeat && !recipient.CatchingUp) recipient.Heard = recipient.Delivered.Count;
             recipient.Owner.Post(frame);
         }
     }

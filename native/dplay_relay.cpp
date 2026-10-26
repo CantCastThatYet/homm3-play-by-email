@@ -259,15 +259,17 @@ public:
         Reader r(reply, 0); const DPID created = r.u32();
         if (!r.ok || !created) return DPERR_CANTCREATEPLAYER;
         // The seat's generation rises each time a new process claims it; older servers send none.
-        // A claimed seat also learns how many frames the relay replays to it.
+        // A claimed seat also learns how many frames the relay replays to it, and how many of those
+        // the other players heard the seat answer (older servers: all of them).
         const std::uint32_t claimedGeneration = reply.size() >= 8 ? r.u32() : 0;
         const std::uint32_t replayed = reply.size() >= 12 ? r.u32() : 0;
+        const std::uint32_t heard = reply.size() >= 16 ? (std::min)(r.u32(), replayed) : replayed;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!localSeat) { localSeat = created; generation = claimedGeneration; statGeneration = claimedGeneration; }
             if (!config.rejoin_seat.empty() && reply.size() >= 12) {
-                replayEnd = config.rejoin_from + replayed; caughtUp = false; replayDoneAt = 0; statCatchingUp = true;
-                Log("The relay replays " + std::to_string(replayed) + " messages to the claimed seat");
+                heardEnd = config.rejoin_from + heard; caughtUp = false; replayDoneAt = 0; statCatchingUp = true;
+                Log("The relay replays " + std::to_string(replayed) + " messages to the claimed seat; " + std::to_string(replayed - heard) + " are new to it");
             }
             const bool claimed = entities.count(created) != 0;
             auto& e = entities[created]; e.group = false; e.flags = flags | DPPLAYER_LOCAL; e.short_name = Short(name); e.long_name = Long(name);
@@ -427,8 +429,14 @@ public:
             }
             if (!config.rejoin_deferred.empty()) Log("Re-delivered " + std::to_string(config.rejoin_deferred.size()) + " deferred messages");
         }
+        // Until it has caught up, a rejoined seat takes only the frames its answers were heard for.
+        std::uint32_t index = statConsumed.load();
         for (auto it = queue.begin(); it != queue.end(); ++it) {
+            const bool counted = it->from != DPID_SYSMSG && !it->injected;
+            const bool unanswered = counted && !caughtUp && index >= heardEnd;
+            if (counted) ++index;
             if (hold && it->from != DPID_SYSMSG) continue;
+            if (unanswered) continue;
             if ((flags & DPRECEIVE_TOPLAYER) && it->to != *to) continue;
             if ((flags & DPRECEIVE_FROMPLAYER) && it->from != *from) continue;
             const HRESULT hr = it->payload.CopyTo(data, size);
@@ -552,10 +560,10 @@ private:
     // Resuming the seat after the connection drops (guarded by mutex): the local player, its
     // generation, the frames received for it, the pending Resume request.
     DPID localSeat = 0; std::uint32_t generation = 0, received = 0, resumeRequest = 0;
-    // A rejoined seat: the consumed count at which the relay's replay ends, and when the restored
-    // engine had it all. The relay ignores the seat until CaughtUp, sent before message
-    // caughtUpAt (both guarded by sendMutex).
-    std::uint32_t replayEnd = 0; ULONGLONG replayDoneAt = 0; bool caughtUp = true;
+    // A rejoined seat: the consumed count up to which the other players heard the seat answer
+    // the relay's replay, and when the restored engine had those. The relay ignores the seat until
+    // CaughtUp, sent before message caughtUpAt (both guarded by sendMutex).
+    std::atomic<std::uint32_t> heardEnd{0}; ULONGLONG replayDoneAt = 0; bool caughtUp = true;
     bool caughtUpSaid = false; std::uint32_t caughtUpAt = 0;
     bool closing = false, abandoned = false;
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -578,25 +586,30 @@ private:
     }
 
     // A rejoined seat has caught up once its restored engine has been given the game's messages,
-    // has consumed the relay's whole replay, and has had five seconds to send what the replay set
-    // off: the relay takes those for the repeats they are. The timer starts at the release when
-    // there is nothing to replay. Until then the player's commands are held (CatchingUp), so none
-    // of theirs is mistaken for a repeat. Caller holds mutex; true once, when CaughtUp is due.
+    // has consumed the replayed frames the seat had already answered, and has had five seconds to
+    // send what they set off: the relay takes those for the repeats they are. The timer starts at
+    // the release when there is no such frame. Frames the seat never answered (sent while it was
+    // away, or arriving now) wait until after CaughtUp, so its answers to them reach the others:
+    // the ST head starts the day change when the last player's End Turn arrives. Until then the
+    // player's commands are held (CatchingUp), so none of theirs is mistaken for a repeat. Caller
+    // holds mutex; true once, when CaughtUp is due.
     bool CatchUpDueLocked() {
         if (caughtUp) return false;
         const ULONGLONG now = GetTickCount64();
         if (!replayDoneAt) {
-            if (holdGameMessages.load() || statConsumed.load() < replayEnd) return false;
-            replayDoneAt = now; Log("The restored seat has the relay's replay; catching up for five seconds");
+            if (holdGameMessages.load() || statConsumed.load() < heardEnd.load()) return false;
+            replayDoneAt = now; Log("The restored seat has the frames it had answered; catching up for five seconds");
             return false;
         }
         if (now - replayDoneAt < 5000) return false;
         caughtUp = true; return true;
     }
+    // Carries where the seat started holding frames back, which tells the relay it did.
+    std::vector<std::uint8_t> CaughtUpFrame() { Writer w(C_CAUGHT_UP); w.u32(heardEnd.load()); return w.Finish(); }
     // Caller holds sendMutex.
     void SayCaughtUpLocked() {
         caughtUpSaid = true; caughtUpAt = statSent.load();
-        if (seatLive) SendLocked(Writer(C_CAUGHT_UP).Finish());
+        if (seatLive) SendLocked(CaughtUpFrame());
         statCatchingUp = false;
         Log("Caught up with the relay's replay");
     }
@@ -765,10 +778,10 @@ private:
         // the seat's messages. A relay that already had it has no seat catching up left.
         bool told = !caughtUpSaid;
         for (std::uint32_t i = held > outboxBase ? held : outboxBase; i < end; ++i, ++resent) {
-            if (!told && i >= caughtUpAt) { SendLocked(Writer(C_CAUGHT_UP).Finish()); told = true; }
+            if (!told && i >= caughtUpAt) { SendLocked(CaughtUpFrame()); told = true; }
             SendLocked(outbox[i - outboxBase]);
         }
-        if (!told) SendLocked(Writer(C_CAUGHT_UP).Finish());
+        if (!told) SendLocked(CaughtUpFrame());
         seatLive = true;
         Log("Seat " + Hex(localSeat) + " resumed; the relay had " + std::to_string(held) + " of its messages, resent " + std::to_string(resent));
     }

@@ -25,8 +25,10 @@ public static class RelayProtocol
     // generation, frames received, messages sent). The reply carries the relay's sent count for the
     // seat; the relay then replays what the client missed. CreatePlayer's reply carries the seat id
     // and its generation, which rises whenever a new process claims the seat; for a claimed seat
-    // also the number of frames the relay replays to it. CaughtUp (no fields): the claiming
-    // process has worked through the replay, so its messages from here on are new.
+    // also the number of frames the relay replays to it and how many of those the seat's answers were
+    // heard for. CaughtUp: the claiming process has worked through those, so its messages from here
+    // on are new. Newer clients add the frame count from which they held the rest back (u32); the
+    // relay then counts every delivered frame as answered.
 
     // The in-game lobby on its own connection, after Hello. LobbyWatch subscribes; LobbyChat
     // carries UTF-8 text; LobbyTurnLimit is a game id and seconds. The server pushes
