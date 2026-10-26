@@ -52,6 +52,10 @@ void SetStatus(const std::string& text);
 void SignIn(const std::string& account, const std::string& password, bool create);
 // Forgets this server's sign-in for the Windows user and ends it on the server.
 void SignOut();
+// "http(s)://host[:port][/path]" without a trailing slash, or empty when the text is not one.
+std::string NormalServer(const std::string& text);
+// Writes the server into HeroesPost.ini and connects to it with this Windows user's sign-in there.
+void SetServer(const std::string& server);
 
 // An authenticated call to this player's server (HeroesPost.ini), with the player's token. Blocking:
 // never from the game thread. `limit` caps the response body.

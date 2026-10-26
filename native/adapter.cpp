@@ -16,6 +16,7 @@
 #include "solo_transport.hpp"
 #include "dplay_relay.hpp"
 #include "lobby_ui.hpp"
+#include "supported_build.hpp"
 #include "vendor/patcher_x86.hpp"
 #include <psapi.h>
 #include <sddl.h>
@@ -236,15 +237,7 @@ void CaptureCompletion(const hota_completion::Snapshot& snapshot, void*) noexcep
     }
 }
 
-struct Build { const wchar_t* name; const char* hash; };
-const Build builds[] = {
-    {L"h3hota HD.exe", "5aaab925f06cccf23bb09814767590a95b84a557eb33d244800520be4f1f18de"},
-    {L"HD_HOTA.dll", "0a2c193d0c510d77080b669a710694ef282761b0ec6f6ac5b86f3166b8038550"},
-    {L"HW_HOTA.dll", "927a087c6d05d40c83de270516f48fdbd1360614259d30689179c1f7300f08db"},
-    {L"patcher_x86.dll", "6134c353e5ac2a056e52bf548cdea853c4424fa5f955df1f5a1f073d784bab40"},
-    {L"_HD3_.dll", "3ed1852e08bae7be2461b31bd922531ccb0c46d01e5b0ecf46d0e7d0dbeeab49"},
-    {L"HotA.dll", "1fa9ad209e756d55e9578b290c4fe6c9ba030d3b52af2085e530416a61ac10c2"}
-};
+const auto& builds = hp_build::Files;
 
 void CheckBuild() {
     if (fingerprintAccepted.load()) return;
@@ -254,19 +247,19 @@ void CheckBuild() {
     bool accepted = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)) == 0x400000;
     std::string reason = accepted ? "not_ready" : "unsupported_engine_base";
     std::ostringstream out; out << '[';
-    for (size_t r = 0; r < _countof(builds); ++r) {
+    for (size_t r = 0; r < _countof(hp_build::Files); ++r) {
         HMODULE found = nullptr; std::wstring path;
         for (DWORD i = 0; i < bytes / sizeof(HMODULE); ++i) {
             auto p = hp::ModulePath(modules[i]); auto basename = p.substr(p.find_last_of(L"\\/") + 1);
-            if (_wcsicmp(basename.c_str(), builds[r].name) == 0 ||
+            if (_wcsicmp(basename.c_str(), builds[r].module) == 0 ||
                 (r == 5 && _wcsicmp(basename.c_str(), L"HotA.dll_181fix") == 0)) { found = modules[i]; path = hp::Canonical(p); break; }
         }
         std::string hash = found ? hp::Sha256(path) : "";
-        bool match = found && hp::Within(path, root) && hash == builds[r].hash;
+        bool match = found && hp::Within(path, root) && hash == builds[r].sha256;
         if (!match) { accepted = false; reason = found ? "fingerprint_mismatch" : "modules_not_ready"; }
         if (r) out << ',';
-        out << "{\"name\":" << hp::Json(hp::Utf8(builds[r].name)) << ",\"path\":" << hp::Json(hp::Utf8(path))
-            << ",\"sha256\":" << hp::Json(hash) << ",\"expectedSha256\":" << hp::Json(builds[r].hash)
+        out << "{\"name\":" << hp::Json(hp::Utf8(builds[r].module)) << ",\"path\":" << hp::Json(hp::Utf8(path))
+            << ",\"sha256\":" << hp::Json(hash) << ",\"expectedSha256\":" << hp::Json(builds[r].sha256)
             << ",\"matched\":" << (match ? "true" : "false") << '}';
         if (r == 1 && match) hdBase.store(reinterpret_cast<std::uintptr_t>(found));
     }

@@ -5,6 +5,7 @@
 #include "json_lite.hpp"
 #include <winhttp.h>
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -345,7 +346,7 @@ enum class Ended { Retry, Now, Wait };
 // One connection: sign in, watch the lobby, apply what the server pushes until it ends.
 Ended Session() {
     if (settings.server.empty()) {
-        Offline("No server set: put server=http://host:port in HeroesPost.ini in the HotA folder.");
+        Offline("No server set: press Server to choose the one you play on.");
         return Ended::Wait;
     }
     const unsigned signedAs = identity.load();
@@ -515,7 +516,7 @@ void SignIn(const std::string& account, const std::string& password, bool create
     std::thread([account, password, create] {
         const auto ini = ReadSettings();
         std::string error;
-        if (ini.server.empty()) error = "No server set: put server=http://host:port in HeroesPost.ini in the HotA folder.";
+        if (ini.server.empty()) error = "No server set: press Server to choose the one you play on.";
         else {
             // Registering as a player from before accounts keeps that player, and with it their games.
             bool claim = false; { std::lock_guard<std::mutex> lock(mutex); claim = create && state.needs_account; }
@@ -549,6 +550,39 @@ void SignOut() {
     SignedOut("Signed out of " + ini.server + ".");
     // The server forgets the token too; if that fails, an unused token stays behind on it.
     if (!ini.token.empty()) std::thread([ini] { Request(ini.server, "POST", "/api/account/sign-out", "", ini.token); }).detach();
+    Kick();
+}
+std::string NormalServer(const std::string& text) {
+    const auto s = Unslashed(Trim(text));
+    std::string lower = s;
+    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lower.rfind("http://", 0) != 0 && lower.rfind("https://", 0) != 0) return "";
+    if (s.find_first_of(" \t\"") != std::string::npos) return "";
+    Url url;
+    return Crack(s, url) && !url.host.empty() ? s : "";
+}
+void SetServer(const std::string& server) {
+    // HeroesPost.ini keeps its other lines.
+    std::ifstream in(iniPath); std::string line; std::ostringstream out; bool written = false;
+    while (std::getline(in, line)) {
+        line = Trim(line);
+        const auto eq = line.find('=');
+        const bool setting = !line.empty() && line[0] != ';' && line[0] != '#' && eq != std::string::npos;
+        if (setting && Trim(line.substr(0, eq)) == "server") { if (!written) out << "server=" << server << "\r\n"; written = true; }
+        else out << line << "\r\n";
+    }
+    in.close();
+    if (!written) out << "server=" << server << "\r\n";
+    std::ofstream(iniPath, std::ios::binary | std::ios::trunc) << out.str();
+    // Each server has its own sign-in: the lobby starts over with this server's.
+    const auto stored = StoredFor(server);
+    ++identity;
+    Publish([&](Snapshot& s) {
+        s.server = server; s.online = false; s.signed_in = !stored.token.empty(); s.needs_account = false;
+        s.account.clear(); s.player.clear(); s.ticket.clear(); s.remembered_account = GameText(stored.account);
+        s.mine.clear(); s.games.clear(); s.chat.clear(); s.status = "Connecting to " + server + "...";
+    });
+    Drop();
     Kick();
 }
 std::string ProblemText(const Reply& reply) { return GameText(Problem(reply)); }

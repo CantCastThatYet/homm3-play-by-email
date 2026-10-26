@@ -212,7 +212,7 @@ not been checked.
 The adapter can also run as a patch inside the player's own HotA installation, with no
 launcher and no desktop app:
 
-- **Loading.** `version.dll` from `artifacts/native/patch-x86` sits in the HotA folder next to
+- **Loading.** `version.dll` sits in the HotA folder next to
   `HeroesPost.Native.dll`. Windows loads it instead of the system `version.dll`; it forwards
   the 17 real exports and loads the adapter in patch mode. Patch mode still checks the
   supported HotA build, but needs no owned-copy marker, and enables its hooks itself once
@@ -221,8 +221,10 @@ launcher and no desktop app:
   start-up but passes every call through to DirectPlay. The lobby switches it on just
   before it drives HotA's own TCP/IP screens. Choosing a connection type by hand switches
   it off again, so normal TCP/IP and the HD+ online lobby are unchanged.
-- **Server.** `HeroesPost.ini` in the HotA folder holds `server=http://host:port`. It is
-  created empty on first start.
+- **Server.** Chosen in the game: with none set, the Heroes Post button opens a server
+  window first (Ctrl+V pastes). The lobby and the sign-in window have a Server button to
+  change it. It is kept as `server=http://host:port` in `HeroesPost.ini` in the HotA folder.
+  Sign-ins are kept per server, so switching back finds the old one.
 - **Accounts.** A player is an account on the server: a name and a password that sign in
   from any HotA (see [Accounts](#accounts)). The game folder holds no identity, so players
   can take turns at one HotA folder.

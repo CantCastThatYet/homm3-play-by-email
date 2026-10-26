@@ -1,0 +1,47 @@
+name: Release
+# A tag v1.2.3 builds the player download (native/package.ps1) and publishes it as a GitHub release.
+# Run by hand, it only builds and keeps the files as a workflow artifact.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find MSVC
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          "VCVARS=$vs\VC\Auxiliary\Build\vcvars32.bat" >> $env:GITHUB_ENV
+      - name: Native tests
+        shell: pwsh
+        run: ./native/build.ps1 -Test -VcVarsPath $env:VCVARS
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.0.0' }
+          ./native/package.ps1 -Version $version -VcVarsPath $env:VCVARS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heroes-post
+          path: artifacts/release/
+      - name: Publish
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+          **Players:** download HeroesPost-Setup and run it. It finds HotA, checks the version and installs. Then start HotA, open the multiplayer screen and press Heroes Post; the first time it asks for your server's address.
+
+          Works with HotA 1.8.1 and the HD Mod that comes with it. The zip holds the same files for installing by hand (see README.txt inside).
+
+          **Игрокам:** скачайте HeroesPost-Setup и запустите его. Он сам найдёт HotA, проверит версию и установит мод. Затем запустите HotA, откройте экран сетевой игры и нажмите Heroes Post; в первый раз он спросит адрес вашего сервера.
+          "@
+          # 0.x versions are the prototype: marked as pre-releases.
+          $pre = if ($env:GITHUB_REF_NAME -like 'v0.*') { '--prerelease' } else { $null }
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem artifacts/release -File).FullName --title "Heroes Post $($env:GITHUB_REF_NAME)" --notes $notes $pre

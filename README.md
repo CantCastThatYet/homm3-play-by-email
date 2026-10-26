@@ -14,7 +14,7 @@ dotnet run --project src/HeroesLobby.Server -- --urls http://0.0.0.0:5080
 
 Each player opens the desktop app, enters the server address and a name, connects, and clicks **Set up HotA** once. **Play HotA** opens HotA connected to the server. In HotA choose New Game, Multiplayer, TCP/IP, then Host or Join, and turn on simultaneous turns in the game options. Keep the app open while playing: it saves your position on the server. After you leave, your game appears under **Your games** with **Continue**; the turn limit for away seats is chosen there too.
 
-**In-game lobby (no app).** Copy `version.dll` and `HeroesPost.Native.dll` from `artifacts/native/patch-x86` into the HotA folder and put `server=http://host:5080` in `HeroesPost.ini` there. HotA's multiplayer screen then has a Heroes Post button. It asks you to sign in or register an account (a name and a password that work from any computer), then opens a lobby with your games, the server's games, chat, Create, Join and Continue; see [In-game lobby](docs/relay-transport.md#in-game-lobby-game-patch) and [Accounts](docs/relay-transport.md#accounts).
+**In-game lobby (no app).** Players run `HeroesPost-Setup.exe` (see [Player download](#player-download)), or copy `version.dll` and `HeroesPost.Native.dll` into the HotA folder by hand. HotA's multiplayer screen then has a Heroes Post button. The first time, it asks for the server's address; the lobby's Server button changes it later. It then asks you to sign in or register an account (a name and a password that work from any computer), then opens a lobby with your games, the server's games, chat, Create, Join and Continue; see [In-game lobby](docs/relay-transport.md#in-game-lobby-game-patch) and [Accounts](docs/relay-transport.md#accounts).
 
 The relay listens on TCP port 5090 (`Relay:Port`) next to the HTTP port. Players' copies connect to the server's host name on that port. Only the supported HotA build is accepted; see `NativeBridge.Fingerprints`. Hosting by hand in HotA's menus has not been verified yet, and other limits are listed in the relay document.
 
@@ -42,7 +42,16 @@ Tests cover authentication and passwords, concurrent joins, revision conflicts, 
 
 ## Host your own server
 
-There is no central service or account provider. `compose.yaml` publishes port 5080, stores state in the named `lobby-data` volume, and restarts the container automatically. Change `Lobby__Name` to name your community. `docker compose down` retains the volume; adding `-v` deletes it.
+There is no central service or account provider. The server runs on Linux; `docker compose up -d --build` on a Linux host is enough. `compose.yaml` publishes HTTP on port 5080 and the game relay on TCP port 5090, stores state in the named `lobby-data` volume, and restarts the container automatically.
+
+Linux specifics, checked 2026-10-26 with the image on Ubuntu 24.04 and two HotAs on Windows:
+- Two players registered, hosted, joined and played a day change.
+- One left and came back with Continue, and both reached the next day with identical games.
+- A container restart mid-game was resumed by both clients without a gap.
+
+Keep in mind:
+- **Relay port:** the relay must be reachable directly on the same port number the server listens on (`Relay__Port`), because the server tells clients its own port. It is plain TCP, not HTTP, so it does not go through a reverse proxy. It is also not encrypted, including the sign-in token it carries.
+- **No stand-ins:** stand-ins need Windows and prepared HotA copies, so on Linux nobody plays an away player's seat. The turn limit is not enforced either. The others wait until that player continues. Change `Lobby__Name` to name your community. `docker compose down` retains the volume; adding `-v` deletes it.
 
 Without Docker:
 
@@ -83,6 +92,24 @@ Game passwords control joining. Game names, map labels, rosters, and preferences
 Writes are transactional and carry a revision where stale changes matter. Settings or roster changes clear readiness. Disconnecting never leaves a game; leaving is an explicit action. The last player leaving removes the game. Leaving as host transfers hosting to the remaining roster. Locked lobbies must be reopened before anyone can change preferences or leave.
 
 The server still serves the earlier lobby API (games, readiness, scripted native launch and solo-resume branches), but the app no longer uses it: games are created in HotA itself.
+
+## Player download
+
+`native/package.ps1` builds what players download, in `artifacts/release`:
+
+- `HeroesPost-Setup-<version>.exe`, a small installer carrying both DLLs. It finds HotA (the HotA installer's uninstall entry, a running HotA, the usual folders, or Browse) and checks the six files the patch is pinned to (`native/supported_build.hpp`). It refuses an unsupported HotA build, another mod's `version.dll`, or a running HotA. It installs the two DLLs, adds an Add or Remove Programs entry for the Windows user, and has Uninstall. It asks for administrator rights only when Windows refuses a write. English or Russian, after the Windows language. `/S /D=<folder> [/uninstall] [/lang=en|ru] [/log=<file>]` runs it without a window.
+- `HeroesPost-<version>.zip`, the same two DLLs and a readme for installing by hand.
+- `SHA256SUMS.txt`.
+
+The installer does not set the server: the game asks for it. Pushing a tag `v1.2.3` runs `.github/workflows/release.yml`, which builds these and publishes a GitHub release. The files are not code-signed, so Windows SmartScreen warns about the installer on first run.
+
+Checked 2026-10-26 on a copy of a real HotA 1.8.1 installation:
+- A silent install wrote the two DLLs and the Add or Remove Programs entry, and no server.
+- In HotA, Heroes Post opened the server window. A pasted address was saved and led to sign-in and the lobby.
+- An invalid address was refused. Switching servers and back from the lobby and the sign-in window found the earlier sign-in.
+- A changed HotA file, another mod's `version.dll`, a folder without HotA, and uninstalling while HotA ran were each refused with the reason.
+- Uninstalling from the copy in the HotA folder removed every Heroes Post file, that copy included.
+- Not tested: the request for administrator rights, and the release workflow.
 
 ## Build desktop packages
 
