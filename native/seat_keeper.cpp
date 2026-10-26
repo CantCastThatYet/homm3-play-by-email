@@ -3,6 +3,7 @@
 #include "dplay_relay.hpp"
 #include "json_lite.hpp"
 #include "lobby_client.hpp"
+#include "world_resume.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -220,6 +221,45 @@ std::string Blob(const std::string& b, size_t& at, bool& ok) {
 }
 bool Plain(const std::string& value) { return value.find_first_of("\r\n") == std::string::npos; }
 
+// The resume starts a one-player game on a map and then replaces its world with the seat's, so the
+// map only has to match the game's size and underground. A random map exists as a file at most on
+// the host that generated it; such a game resumes on a map that ships with HotA or the game.
+struct SubstituteMaps { std::uint32_t size; bool underground; const char* names[3]; };
+constexpr SubstituteMaps Substitutes[] = {
+    {36, false, {"[HotA] Face To Face.h3m", "Judgement Day.h3m", "Good to Go.h3m"}},
+    {36, true, {"[HotA] Air Tyrants.h3m", "A Warm and Familiar Place.h3m", "Arrogance.h3m"}},
+    {72, false, {"[HotA] Around the Bay.h3m", "Ascension.h3m", "Dawn of War.h3m"}},
+    {72, true, {"[HotA] Air Supremacy.h3m", "All for One.h3m", "Buried Treasure.h3m"}},
+    {108, false, {"[HotA] Island of Dust.h3m", "Battle of the Sexes.h3m", "Brave New World.h3m"}},
+    {108, true, {"[HotA] Broken Compass.h3m", "Free for All.h3m", "Land of Titans.h3m"}},
+    {144, false, {"[HotA] When Seas Were Deeper.h3m", "A Viking We Shall Go.h3m", "Reclamation.h3m"}},
+    {144, true, {"[HotA] The Alliance.h3m", "Myth and Legend.h3m", "Race for Ardintinny.h3m"}},
+    {180, true, {"[HotA] A New Day Tomorrow.h3m", "[HotA] Daggerwin Valley.h3m", nullptr}},
+    {216, true, {"[HotA] Barren Lands.h3m", nullptr, nullptr}},
+    {252, true, {"[HotA] Noble Nemesis.h3m", "[HotA] The Devil Is in the Detail.h3m", nullptr}},
+};
+
+// The game's map if it is installed, else an installed map of its size; empty with the reason if none.
+std::string ScaffoldMap(const std::wstring& root, const std::string& map, const std::string& image, std::string& reason) {
+    const auto installed = [&](const std::string& name) { return GetFileAttributesW((root + L"\\Maps\\" + Wide(name, CP_ACP)).c_str()) != INVALID_FILE_ATTRIBUTES; };
+    if (installed(map)) return map;
+    // The resume image (HPR1, version, color, day, week, month, kind) holds the world, its
+    // baseline and the world's audit, which has the map's geometry.
+    size_t at = 28; bool ok = image.size() >= at && image.compare(0, 4, "HPR1") == 0;
+    Blob(image, at, ok); Blob(image, at, ok);
+    const auto audit = Blob(image, at, ok);
+    hota_resume::Audit geometry;
+    if (!ok || !hota_resume::DecodeAudit(std::vector<std::uint8_t>(audit.begin(), audit.end()), geometry)) {
+        reason = "this game is played on the map " + map + ", which is not in your Maps folder."; return {};
+    }
+    for (const auto& s : Substitutes)
+        if (s.size == static_cast<std::uint32_t>(geometry.map_size) && s.underground == (geometry.underground != 0))
+            for (const char* name : s.names) if (name && installed(name)) return name;
+    reason = "this game is played on the map " + map + ", which is not in your Maps folder, and no installed map of its size (" +
+        std::to_string(geometry.map_size) + (geometry.underground ? ", with underground" : ", without underground") + ") can stand in for it.";
+    return {};
+}
+
 void Prepare(const std::string& id) {
     const auto fail = [](const std::string& text) { hp_lobby_client::SetStatus(text); continuing = false; };
     const auto snapshot = hp_lobby_client::Get();
@@ -241,8 +281,10 @@ void Prepare(const std::string& id) {
     if (!ok || magic != 0x314B5048 || color > 7 || image.empty() || !Plain(session) || !Plain(seat) || map.find_first_of("\\/:\r\n") != std::string::npos) {
         fail("Cannot continue: the server sent an unreadable seat."); return;
     }
-    const auto mapPath = folder + L"\\Maps\\" + Wide(map, CP_ACP);
-    if (GetFileAttributesW(mapPath.c_str()) == INVALID_FILE_ATTRIBUTES) { fail("Cannot continue: this game is played on the map " + map + ", which is not in your Maps folder."); return; }
+    std::string reason;
+    const auto scaffold = ScaffoldMap(folder, map, image, reason);
+    if (scaffold.empty()) { fail("Cannot continue: " + reason); return; }
+    if (scaffold != map) Log("Continue: the map " + map + " is not installed; resuming on " + scaffold + ", a map of the same size");
     // Restart hands these to the new HotA under this process's tag.
     const auto tag = std::to_wstring(GetCurrentProcessId());
     if (!WriteFileBytes(hp::HandoffPath(folder, tag, L"resume.bin"), image.data(), image.size())) { fail("Cannot continue: the seat could not be written to the HotA folder."); return; }
@@ -256,7 +298,7 @@ void Prepare(const std::string& id) {
     ini += std::string("seatid=") + seatText + "\r\n";
     if (sent != 0xFFFFFFFFu) ini += "sent=" + std::to_string(sent) + "\r\n";
     if (deferredCount) ini += "deferred=HeroesPost." + std::to_string(GetCurrentProcessId()) + ".deferred.bin\r\n";
-    ini += "map=" + map + "\r\ncolor=" + std::to_string(color) + "\r\ngame=" + gameName + "\r\n";
+    ini += "map=" + scaffold + "\r\ncolor=" + std::to_string(color) + "\r\ngame=" + gameName + "\r\n";
     if (!Plain(snapshot.ticket) || !Plain(snapshot.player) || !WriteFileBytes(hp::HandoffPath(folder, tag, L"continue.ini"), ini.data(), ini.size())) {
         fail("Cannot continue: the seat could not be written to the HotA folder."); return;
     }

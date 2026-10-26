@@ -170,8 +170,16 @@ The handover no longer needs scripts.
   minutes. The app downloads the latest capture, writes `rejoin=`/`seat=` and resumes it,
   and the seat keeper takes over.
 - **Maps.** Captures record the scenario file (`map_file`, from `world+0x1F6D9`), and resume
-  starts its scaffold from that map instead of Judgement Day. The map must be installed in
-  the resuming copy, including the server's stand-in copies.
+  starts its scaffold from that map instead of Judgement Day. The scaffold's world is replaced
+  by the seat's, and the resume only checks its size and underground
+  (`scaffold_geometry_mismatch`). So when the map is not installed, Continue starts the scaffold
+  on a map that ships with HotA or the game, of the same size and underground
+  (`seat_keeper.cpp`, `Substitutes`). Random maps need this: HotA names them after the players,
+  the time and the template (`Nort,SigmaGoidaSkibid 2026.10.26 19;58 {Default}.h3m`), and the file
+  exists at most on the host that generated it. No shipped map is Huge, Extra Huge or Giant
+  without underground, so such a random game cannot be continued yet. Checked 2026-10-27: Blue
+  continued an Air Supremacy game (72, underground) with that map hidden from its copy. It
+  resumed on All for One, and both players reached days 2 and 3 with identical worlds.
 
 Relay ini values are written in Latin-1: HotA's session names contain a non-ASCII separator
 between the game name and the host's name, and the relay compares raw bytes. Captures and
