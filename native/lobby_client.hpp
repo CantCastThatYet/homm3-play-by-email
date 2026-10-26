@@ -62,6 +62,9 @@ void SetServer(const std::string& server);
 struct Reply { int status = 0; std::string body, error; };
 Reply Call(const char* method, const std::string& path, const std::string& body = {}, const wchar_t* type = L"application/json",
     size_t limit = 1024 * 1024, int timeout_seconds = 30);
+// The same with a given token, such as the one a running game was joined with; empty uses the player's.
+Reply CallAs(const std::string& token, const char* method, const std::string& path, const std::string& body = {},
+    const wchar_t* type = L"application/json", size_t limit = 1024 * 1024, int timeout_seconds = 30);
 // What went wrong with a call, in the game's character set.
 std::string ProblemText(const Reply& reply);
 void SendChat(const std::string& text);

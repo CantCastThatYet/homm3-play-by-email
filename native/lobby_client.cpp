@@ -501,9 +501,13 @@ void Connect(const std::string& player_name) {
 void SetStatus(const std::string& text) { Publish([&](Snapshot& s) { s.status = text; }); }
 
 Reply Call(const char* method, const std::string& path, const std::string& body, const wchar_t* type, size_t limit, int timeout_seconds) {
+    return CallAs({}, method, path, body, type, limit, timeout_seconds);
+}
+Reply CallAs(const std::string& token, const char* method, const std::string& path, const std::string& body, const wchar_t* type, size_t limit, int timeout_seconds) {
     const auto ini = ReadSettings();
-    if (ini.server.empty() || ini.token.empty()) { Reply r; r.error = "not signed in to the server"; return r; }
-    return Request(ini.server, method, path, body, ini.token, type, limit, timeout_seconds);
+    const auto& as = token.empty() ? ini.token : token;
+    if (ini.server.empty() || as.empty()) { Reply r; r.error = "not signed in to the server"; return r; }
+    return Request(ini.server, method, path, body, as, type, limit, timeout_seconds);
 }
 
 void SignIn(const std::string& account, const std::string& password, bool create) {
@@ -548,8 +552,9 @@ void SignOut() {
     ++identity;
     Drop();
     SignedOut("Signed out of " + ini.server + ".");
-    // The server forgets the token too; if that fails, an unused token stays behind on it.
-    if (!ini.token.empty()) std::thread([ini] { Request(ini.server, "POST", "/api/account/sign-out", "", ini.token); }).detach();
+    // The server keeps the token: another HotA of this Windows user may be in a game with it, and
+    // its saves and its reconnects to the relay need it. Revoking it there left that game's seat
+    // without a single save (2026-10-27).
     Kick();
 }
 std::string NormalServer(const std::string& text) {

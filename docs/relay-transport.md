@@ -412,7 +412,10 @@ Checked 2026-10-26 with two R24 HotAs and a local server without stand-ins:
 - it captures the turn in progress once each new day, and two seconds after the player stops
   acting, at most every ten seconds;
 - it zips the capture folder itself (stored entries) and uploads it to
-  `POST /api/relay/games/{id}/captures` with the player's token;
+  `POST /api/relay/games/{id}/captures` with the token its game was opened with. The server files a
+  capture under its sender's seat, and the sign-in file belongs to the Windows user: when a second
+  HotA signed in as another player, the first one's captures went to that player's seat, and its
+  own seat had none to continue from (2026-10-27);
 - it deletes the process's older capture folders.
 
 A capture of a 72x72 map is about 2.5 MB uncompressed.
@@ -483,8 +486,9 @@ apart.
   an engine edit that never draws itself; a canvas over it shows one star per character. A
   player from before accounts sees the same window, worded to register and keep their games.
   If the server stops accepting the sign-in (signed out elsewhere, a new database), the lobby
-  closes and the window opens. **Sign out** in the lobby ends the sign-in on the server and
-  returns to the window.
+  closes and the window opens. **Sign out** in the lobby forgets the sign-in on this PC and
+  returns to the window. It no longer ends it on the server: another HotA of the same Windows
+  user may be playing with it.
 - **The lobby's windows and the screen.** HotA keeps no copy of the main menu's art under its
   dialogs (the window manager's backup screen is null), and the lobby is larger than the
   multiplayer dialog under it, so its edges used to stay on the menu after it closed. The patch

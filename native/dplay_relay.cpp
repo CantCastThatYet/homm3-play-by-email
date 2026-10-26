@@ -1204,6 +1204,7 @@ bool Installed() noexcept { return active.load(); }
 bool Reconnecting() noexcept { return statReconnecting.load(); }
 bool InGame() noexcept { return active.load() && statOpen.load(); }
 std::string CurrentInstance() { if (!InGame()) return {}; std::lock_guard<std::mutex> lock(statusMutex); return statusInstance; }
+std::string GameTicket() { if (!InGame()) return {}; return CurrentConfig().ticket; }
 unsigned ReconnectCount() noexcept { return statReconnects.load(); }
 std::uint32_t ConsumedCount() noexcept { return statConsumed.load(); }
 std::uint32_t SentCount() noexcept { return statSent.load(); }

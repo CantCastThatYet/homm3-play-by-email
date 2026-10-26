@@ -136,7 +136,10 @@ private:
             std::ifstream in(path, std::ios::binary); std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             hp_json::Value m; completion = hp_json::Parse(text, m) && m["native_completion"]["observed"].truthy();
         }
-        const auto reply = hp_lobby_client::Call("POST", "/api/relay/games/" + instance + "/captures", zip, L"application/octet-stream", 64 * 1024, 120);
+        // As whoever this HotA joined the game as: another HotA of the same Windows user may have
+        // signed in as another player since, and the server files a capture under its sender's seat.
+        const auto reply = hp_lobby_client::CallAs(hp_relay::GameTicket(), "POST", "/api/relay/games/" + instance + "/captures", zip,
+            L"application/octet-stream", 64 * 1024, 120);
         if (reply.status != 200) { Notice("Your seat could not be saved on the server: " + hp_lobby_client::ProblemText(reply)); return; }
         Log("Saved " + std::string(completion ? "End Turn" : "current") + " capture (" + std::to_string(zip.size()) + " bytes) of game " + instance);
         if (completion) Notice("Turn ended and saved on the server. You may close HotA: your seat is kept.");

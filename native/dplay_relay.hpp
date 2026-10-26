@@ -48,6 +48,9 @@ bool Reconnecting() noexcept;
 // True while a relay session is open; its instance GUID as text ("xxxxxxxx-xxxx-..."), or empty.
 bool InGame() noexcept;
 std::string CurrentInstance();
+// The credential this HotA's game was opened with; empty while no game is open. Another HotA of the
+// same Windows user may sign in as someone else meanwhile: the seat stays this one's.
+std::string GameTicket();
 unsigned ReconnectCount() noexcept;
 // True when this client resumes a held seat in a running game (rejoin= and seat=).
 bool Rejoining() noexcept;
