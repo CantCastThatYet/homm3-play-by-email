@@ -215,6 +215,7 @@ std::atomic<bool> statReconnecting{false};
 std::atomic<unsigned> statReconnects{0};
 std::atomic<std::uint32_t> statGeneration{0};
 std::atomic<bool> holdGameMessages{false};
+std::atomic<bool> statCatchingUp{false};
 std::map<std::uint32_t, std::string> rejoinNames; // guarded by statusMutex
 std::mutex statusMutex;
 std::string statusSession, statusError, statusInstance;
@@ -264,7 +265,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!localSeat) { localSeat = created; generation = claimedGeneration; statGeneration = claimedGeneration; }
-            if (!config.rejoin_seat.empty() && reply.size() >= 12) { replayEnd = config.rejoin_from + replayed; caughtUp = false; replayDoneAt = 0; }
+            if (!config.rejoin_seat.empty() && reply.size() >= 12) {
+                replayEnd = config.rejoin_from + replayed; caughtUp = false; replayDoneAt = 0; statCatchingUp = true;
+                Log("The relay replays " + std::to_string(replayed) + " messages to the claimed seat");
+            }
             const bool claimed = entities.count(created) != 0;
             auto& e = entities[created]; e.group = false; e.flags = flags | DPPLAYER_LOCAL; e.short_name = Short(name); e.long_name = Long(name);
             e.remote_data.assign(static_cast<std::uint8_t*>(data), static_cast<std::uint8_t*>(data) + (data ? size : 0));
@@ -407,6 +411,9 @@ public:
     virtual HRESULT WINAPI Receive(DPID* from, DPID* to, DWORD flags, void* data, DWORD* size) {
         if (!from || !to || !size) return DPERR_INVALIDPARAMS;
         std::lock_guard<std::mutex> lock(mutex);
+        // The engine polls here all the time, so a rejoined seat says it has caught up even
+        // while its player does nothing.
+        if (CatchUpDueLocked()) { std::lock_guard<std::mutex> send(sendMutex); SayCaughtUpLocked(); }
         const bool hold = holdGameMessages.load();
         if (!hold && !deferredDelivered && seatId) {
             // Ahead of the relay replay, exactly as the captured engine had already received them.
@@ -429,7 +436,6 @@ public:
             *from = it->from; *to = it->to;
             if (!(flags & DPRECEIVE_PEEK)) {
                 if (it->from != DPID_SYSMSG && !it->injected) ++statConsumed;
-                if (replayEnd && !replayDoneAt && statConsumed >= replayEnd) replayDoneAt = GetTickCount64();
                 queue.erase(it);
             }
             return hr;
@@ -445,14 +451,9 @@ public:
         // Kept until the relay may have it: after a dropped connection the relay says how many of
         // this seat's messages it has, and the rest are sent again.
         bool announce = false;
-        {
-            // A rejoined seat has worked through the relay's replay and what it set off: tell the
-            // relay, which until then takes repeats of the seat's old messages for what they are.
-            std::lock_guard<std::mutex> state(mutex);
-            if (replayEnd && !caughtUp && replayDoneAt && GetTickCount64() - replayDoneAt >= 5000) { caughtUp = true; announce = true; }
-        }
+        { std::lock_guard<std::mutex> state(mutex); announce = CatchUpDueLocked(); }
         std::lock_guard<std::mutex> lock(sendMutex);
-        if (announce) { Writer w2(C_CAUGHT_UP); SendLocked(w2.Finish()); Log("Caught up with the relay's replay"); }
+        if (announce) SayCaughtUpLocked();
         outboxBytes += frame.size();
         outbox.push_back(frame);
         while (outbox.size() > 1 && (outbox.size() > 8192 || outboxBytes > 32u * 1024 * 1024)) {
@@ -551,8 +552,11 @@ private:
     // Resuming the seat after the connection drops (guarded by mutex): the local player, its
     // generation, the frames received for it, the pending Resume request.
     DPID localSeat = 0; std::uint32_t generation = 0, received = 0, resumeRequest = 0;
-    // A rejoined seat: the consumed count at which the relay's replay ends, and when it was reached.
+    // A rejoined seat: the consumed count at which the relay's replay ends, and when the restored
+    // engine had it all. The relay ignores the seat until CaughtUp, sent before message
+    // caughtUpAt (both guarded by sendMutex).
     std::uint32_t replayEnd = 0; ULONGLONG replayDoneAt = 0; bool caughtUp = true;
+    bool caughtUpSaid = false; std::uint32_t caughtUpAt = 0;
     bool closing = false, abandoned = false;
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     bool wsa = false;
@@ -573,6 +577,29 @@ private:
         return std::move(w.b);
     }
 
+    // A rejoined seat has caught up once its restored engine has been given the game's messages,
+    // has consumed the relay's whole replay, and has had five seconds to send what the replay set
+    // off: the relay takes those for the repeats they are. The timer starts at the release when
+    // there is nothing to replay. Until then the player's commands are held (CatchingUp), so none
+    // of theirs is mistaken for a repeat. Caller holds mutex; true once, when CaughtUp is due.
+    bool CatchUpDueLocked() {
+        if (caughtUp) return false;
+        const ULONGLONG now = GetTickCount64();
+        if (!replayDoneAt) {
+            if (holdGameMessages.load() || statConsumed.load() < replayEnd) return false;
+            replayDoneAt = now; Log("The restored seat has the relay's replay; catching up for five seconds");
+            return false;
+        }
+        if (now - replayDoneAt < 5000) return false;
+        caughtUp = true; return true;
+    }
+    // Caller holds sendMutex.
+    void SayCaughtUpLocked() {
+        caughtUpSaid = true; caughtUpAt = statSent.load();
+        if (seatLive) SendLocked(Writer(C_CAUGHT_UP).Finish());
+        statCatchingUp = false;
+        Log("Caught up with the relay's replay");
+    }
     // ---- connection
     SOCKET Dial() {
         addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; hints.ai_protocol = IPPROTO_TCP;
@@ -615,7 +642,7 @@ private:
         { std::lock_guard<std::mutex> lock(sendMutex); if (socket_ != INVALID_SOCKET) { closesocket(socket_); socket_ = INVALID_SOCKET; } }
         if (wsa) { WSACleanup(); wsa = false; }
         if (wake) { CloseHandle(wake); wake = nullptr; }
-        connected = false; statConnected = false; statOpen = false; statReconnecting = false; --statObjects;
+        connected = false; statConnected = false; statOpen = false; statReconnecting = false; statCatchingUp = false; --statObjects;
     }
     static void SetError(const char* text) { std::lock_guard<std::mutex> lock(statusMutex); statusError = text; }
     // Caller holds sendMutex.
@@ -734,7 +761,14 @@ private:
         const std::uint32_t end = outboxBase + static_cast<std::uint32_t>(outbox.size());
         if (held < outboxBase) Log("The relay is missing messages " + std::to_string(held) + ".." + std::to_string(outboxBase) + " of this seat; they are no longer kept");
         std::uint32_t resent = 0;
-        for (std::uint32_t i = held > outboxBase ? held : outboxBase; i < end; ++i, ++resent) SendLocked(outbox[i - outboxBase]);
+        // CaughtUp may have been lost with the connection: it is said again in its place among
+        // the seat's messages. A relay that already had it has no seat catching up left.
+        bool told = !caughtUpSaid;
+        for (std::uint32_t i = held > outboxBase ? held : outboxBase; i < end; ++i, ++resent) {
+            if (!told && i >= caughtUpAt) { SendLocked(Writer(C_CAUGHT_UP).Finish()); told = true; }
+            SendLocked(outbox[i - outboxBase]);
+        }
+        if (!told) SendLocked(Writer(C_CAUGHT_UP).Finish());
         seatLive = true;
         Log("Seat " + Hex(localSeat) + " resumed; the relay had " + std::to_string(held) + " of its messages, resent " + std::to_string(resent));
     }
@@ -1161,6 +1195,7 @@ unsigned ReconnectCount() noexcept { return statReconnects.load(); }
 std::uint32_t ConsumedCount() noexcept { return statConsumed.load(); }
 std::uint32_t SentCount() noexcept { return statSent.load(); }
 void ReleaseGameMessages() noexcept { holdGameMessages = false; }
+bool CatchingUp() noexcept { return statCatchingUp.load(); }
 bool RejoinPlayerName(std::uint32_t id, std::string& name) {
     std::lock_guard<std::mutex> lock(statusMutex);
     const auto it = rejoinNames.find(id); if (it == rejoinNames.end()) return false;

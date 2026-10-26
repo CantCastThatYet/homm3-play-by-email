@@ -25,6 +25,10 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("writes", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "local",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+    // Each try at a password costs the server a PBKDF2 hash and a guesser one guess.
+    options.AddPolicy("sign-in", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "local",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 var app = builder.Build();
 var lobbyStore = app.Services.GetRequiredService<LobbyStore>();
@@ -49,6 +53,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapGet("/api/info", (IConfiguration config) => new ServerInfo(config["Lobby:Name"] ?? "Heroes Post · Community server", Protocol.Version, false, true));
 app.MapPost("/api/players", (RegisterPlayer request, LobbyStore store) => store.Register(request)).RequireRateLimiting("writes");
 app.MapGet("/api/me", (HttpContext context, LobbyStore store) => Identity(context, store));
+app.MapAccountEndpoints();
 app.MapGet("/api/games", (LobbyStore store) => store.List());
 app.MapGet("/api/games/{id}", (string id, LobbyStore store) => store.Get(id));
 

@@ -4,6 +4,7 @@
 #include "lobby_client.hpp"
 #include "json_lite.hpp"
 #include <winhttp.h>
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -53,37 +54,90 @@ std::string JsonString(const std::string& utf8) {
 }
 
 // ------------------------------------------------------------------ settings
-struct Settings { std::string server, token, token_server; };
+// HeroesPost.ini in the HotA folder names the server. Who plays belongs to the Windows user: their
+// sign-ins live in %LOCALAPPDATA%\HeroesPost\accounts.ini, one token per server, so any HotA they
+// start plays as them, and a copied or shared HotA folder carries no one's identity.
+struct Settings { std::string server, token; };
 std::string Trim(std::string s) {
     while (!s.empty() && (s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
     size_t i = 0; while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
     return s.substr(i);
 }
-Settings ReadSettings() {
-    Settings s; std::ifstream in(iniPath); std::string line;
+std::string Unslashed(std::string server) { while (!server.empty() && server.back() == '/') server.pop_back(); return server; }
+
+std::mutex storeMutex;
+// HEROES_POST_PROFILE names another directory for it, as it does for the desktop app: two players on one
+// Windows user, for trying a game alone.
+std::wstring StorePath() {
+    wchar_t base[MAX_PATH]{};
+    std::wstring dir;
+    if (GetEnvironmentVariableW(L"HEROES_POST_PROFILE", base, MAX_PATH)) dir = base;
+    else if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH)) dir = std::wstring(base) + L"\\HeroesPost";
+    else return {};
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\accounts.ini";
+}
+// Lines "server<TAB>token<TAB>account": the account name stays after signing out, for the next sign-in.
+struct Stored { std::string server, token, account; };
+std::vector<Stored> ReadStore() {
+    std::vector<Stored> entries;
+    std::ifstream in(StorePath()); std::string line;
     while (std::getline(in, line)) {
         line = Trim(line);
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        const auto eq = line.find('='); if (eq == std::string::npos) continue;
-        const auto key = Trim(line.substr(0, eq)), value = Trim(line.substr(eq + 1));
-        if (key == "server") s.server = value;
-        else if (key == "token") s.token = value;
-        else if (key == "token_server") s.token_server = value;
+        const auto tab = line.find('\t');
+        if (line.empty() || line[0] == ';' || tab == std::string::npos) continue;
+        const auto rest = line.substr(tab + 1);
+        const auto second = rest.find('\t');
+        entries.push_back({Unslashed(line.substr(0, tab)), Trim(rest.substr(0, second)), second == std::string::npos ? "" : Trim(rest.substr(second + 1))});
     }
-    while (!s.server.empty() && s.server.back() == '/') s.server.pop_back();
-    return s;
+    return entries;
 }
-// Rewrites token= and token_server=, keeping every other line as the player wrote it.
-void SaveIdentity(const std::string& token, const std::string& server) {
-    std::ifstream in(iniPath); std::string line; std::ostringstream out;
-    while (std::getline(in, line)) {
-        const auto key = Trim(line.substr(0, line.find('=')));
-        if (key == "token" || key == "token_server") continue;
-        out << Trim(line) << "\r\n";
+Stored StoredFor(const std::string& server) {
+    std::lock_guard<std::mutex> lock(storeMutex);
+    for (const auto& e : ReadStore()) if (e.server == server) return e;
+    return {server, "", ""};
+}
+std::string StoredToken(const std::string& server) { return StoredFor(server).token; }
+// An empty token signs out of the server; an empty account keeps the one remembered.
+void StoreToken(const std::string& server, const std::string& token, const std::string& account = {}) {
+    std::lock_guard<std::mutex> lock(storeMutex);
+    auto entries = ReadStore();
+    Stored entry{server, token, account};
+    for (const auto& e : entries) if (e.server == server && entry.account.empty()) entry.account = e.account;
+    entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Stored& e) { return e.server == server; }), entries.end());
+    if (!entry.token.empty() || !entry.account.empty()) entries.push_back(entry);
+    std::ostringstream out; out << "; Heroes Post sign-ins of this Windows user: server, token (empty when signed out), account name; tab-separated.\r\n";
+    for (const auto& e : entries) out << e.server << '\t' << e.token << '\t' << e.account << "\r\n";
+    std::ofstream(StorePath(), std::ios::binary | std::ios::trunc) << out.str();
+}
+
+Settings ReadSettings() {
+    Settings s; std::string token, tokenServer;
+    {
+        std::ifstream in(iniPath); std::string line;
+        while (std::getline(in, line)) {
+            line = Trim(line);
+            if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+            const auto eq = line.find('='); if (eq == std::string::npos) continue;
+            const auto key = Trim(line.substr(0, eq)), value = Trim(line.substr(eq + 1));
+            if (key == "server") s.server = Unslashed(value);
+            else if (key == "token") token = value;
+            else if (key == "token_server") tokenServer = Unslashed(value);
+        }
     }
-    in.close();
-    out << "token=" << token << "\r\ntoken_server=" << server << "\r\n";
-    std::ofstream(iniPath, std::ios::binary | std::ios::trunc) << out.str();
+    // Before accounts the identity was written into HeroesPost.ini: it moves to the Windows user's store.
+    if (!token.empty()) {
+        if (!tokenServer.empty() && StoredToken(tokenServer).empty()) StoreToken(tokenServer, token);
+        std::ifstream in(iniPath); std::string line; std::ostringstream out;
+        while (std::getline(in, line)) {
+            const auto key = Trim(line.substr(0, line.find('=')));
+            if (key != "token" && key != "token_server") out << Trim(line) << "\r\n";
+        }
+        in.close();
+        std::ofstream(iniPath, std::ios::binary | std::ios::trunc) << out.str();
+    }
+    if (!s.server.empty()) s.token = StoredToken(s.server);
+    return s;
 }
 void WriteTemplate() {
     if (GetFileAttributesW(iniPath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
@@ -224,23 +278,13 @@ void Publish(const std::function<void(Snapshot&)>& change) {
 void Offline(const std::string& status) { Publish([&](Snapshot& s) { s.online = false; s.status = status; }); }
 
 Settings settings;              // the worker's copy
+std::atomic<unsigned> identity{0}; // changes whenever this HotA signs in or out
 
-// True when settings.token is usable; `fresh` reports a token made just now.
-bool EnsureIdentity(bool& fresh) {
-    fresh = false;
-    if (!settings.token.empty() && settings.token_server == settings.server) return true;
-    std::string player; { std::lock_guard<std::mutex> lock(mutex); player = name; }
-    if (player.empty()) player = "Player";
-    const auto r = Request(settings.server, "POST", "/api/players", "{\"displayName\":" + JsonString(Utf8Text(player)) + "}");
-    hp_json::Value v;
-    if (r.status != 200 || !hp_json::Parse(r.body, v) || v["token"].str().empty()) {
-        Offline("Cannot sign in to " + settings.server + ": " + GameText(Problem(r)));
-        return false;
-    }
-    settings.token = v["token"].str(); settings.token_server = settings.server;
-    SaveIdentity(settings.token, settings.server);
-    fresh = true;
-    return true;
+void SignedOut(const std::string& status) {
+    Publish([&](Snapshot& s) {
+        s.online = false; s.signed_in = false; s.needs_account = false; s.account.clear(); s.player.clear(); s.ticket.clear();
+        s.mine.clear(); s.games.clear(); s.chat.clear(); s.status = status;
+    });
 }
 
 // "2026-10-25T12:34:56.789+00:00" (the server's UTC timestamps) as Unix seconds; 0 if absent.
@@ -304,10 +348,25 @@ Ended Session() {
         Offline("No server set: put server=http://host:port in HeroesPost.ini in the HotA folder.");
         return Ended::Wait;
     }
-    bool fresh = false;
-    if (!EnsureIdentity(fresh)) return Ended::Retry;
-    const auto info = Request(settings.server, "GET", "/api/relay", "");
+    const unsigned signedAs = identity.load();
+    if (settings.token.empty()) { SignedOut("Sign in to " + settings.server + " to play."); return Ended::Wait; }
     hp_json::Value v;
+    const auto account = Request(settings.server, "GET", "/api/account", "", settings.token);
+    if (account.status == 401) {
+        // The server no longer knows this sign-in: signed out elsewhere, or a new database.
+        if (identity.load() == signedAs) StoreToken(settings.server, "");
+        SignedOut("Your sign-in to " + settings.server + " has ended. Sign in again.");
+        return Ended::Wait;
+    }
+    if (account.status != 200 || !hp_json::Parse(account.body, v)) {
+        Offline("Cannot reach " + settings.server + ": " + GameText(Problem(account)));
+        return Ended::Retry;
+    }
+    Publish([&](Snapshot& s) {
+        s.signed_in = true; s.needs_account = v["name"].str().empty();
+        s.account = GameText(v["name"].str()); s.player = GameText(v["player"]["displayName"].str());
+    });
+    const auto info = Request(settings.server, "GET", "/api/relay", "");
     if (info.status != 200 || !hp_json::Parse(info.body, v) || v["port"].integer() <= 0) {
         Offline("Cannot reach " + settings.server + ": " + GameText(info.status == 200 ? "the server has no game relay" : Problem(info)));
         return Ended::Retry;
@@ -318,12 +377,14 @@ Ended Session() {
     const SOCKET s = Dial(host, port, error);
     if (s == INVALID_SOCKET) { Offline("Cannot reach " + settings.server + ": " + error); return Ended::Retry; }
     { std::lock_guard<std::mutex> lock(sendMutex); relay = s; }
+    // Signed in or out while this connection was being made: start over as the new player.
+    if (identity.load() != signedAs) { std::lock_guard<std::mutex> lock(sendMutex); closesocket(relay); relay = INVALID_SOCKET; return Ended::Now; }
     std::string player; { std::lock_guard<std::mutex> lock(mutex); player = name; }
     Frame hello(C_HELLO); hello.u32(ProtocolVersion).blob(settings.token).blob(player);
     Frame watch(C_LOBBY_WATCH);
     Publish([&](Snapshot& snap) { snap.server = settings.server; snap.relay_host = host; snap.relay_port = port; snap.ticket = settings.token; });
 
-    Ended ended = Ended::Retry; bool firstChat = true;
+    Ended ended = Ended::Retry; bool firstChat = true, refused = false;
     if (Post(hello) && Post(watch)) {
         std::vector<std::uint8_t> frame;
         for (;;) {
@@ -343,10 +404,8 @@ Ended Session() {
             } else if (type == S_LOBBY_NOTICE) {
                 const auto code = r.u32(); const auto text = GameText(r.blob());
                 if (code == NOTICE_SIGN_IN) {
-                    // The server no longer knows this identity (a new database): make a new one once.
-                    if (fresh) { Offline("The server refused a new identity: " + text); ended = Ended::Wait; break; }
-                    settings.token.clear();
-                    ended = Ended::Now;
+                    // The relay refused this sign-in: the account check of the next try signs out if it is gone.
+                    refused = true;
                     break;
                 }
                 Publish([&](Snapshot& snap) { snap.status = text; });
@@ -354,8 +413,15 @@ Ended Session() {
         }
     }
     { std::lock_guard<std::mutex> lock(sendMutex); closesocket(relay); relay = INVALID_SOCKET; }
+    if (identity.load() != signedAs) return Ended::Now;
+    if (refused) { Offline("The server refused this sign-in. Trying again..."); return Ended::Retry; }
     if (ended == Ended::Retry) Offline("Lost the connection to " + settings.server + ". Reconnecting...");
     return ended;
+}
+
+void Kick() {
+    { std::lock_guard<std::mutex> lock(mutex); wanted = true; kick = true; }
+    wake.notify_all();
 }
 
 void Worker() {
@@ -412,6 +478,10 @@ void Open(const std::string& player_name) {
         if (!wanted || redial || !state.online) { wanted = true; kick = true; }
         if (!state.online) state.status = "Connecting...";
         state.server = server;
+        // Known at once, so the lobby can ask for a sign-in before any connection.
+        const auto stored = StoredFor(server);
+        if (!state.online) state.signed_in = !server.empty() && !stored.token.empty();
+        state.remembered_account = GameText(stored.account);
         ++state.version;
     }
     if (redial) Drop();
@@ -431,8 +501,55 @@ void SetStatus(const std::string& text) { Publish([&](Snapshot& s) { s.status = 
 
 Reply Call(const char* method, const std::string& path, const std::string& body, const wchar_t* type, size_t limit, int timeout_seconds) {
     const auto ini = ReadSettings();
-    if (ini.server.empty() || ini.token.empty() || ini.token_server != ini.server) { Reply r; r.error = "this HotA has not signed in to its server yet"; return r; }
+    if (ini.server.empty() || ini.token.empty()) { Reply r; r.error = "not signed in to the server"; return r; }
     return Request(ini.server, method, path, body, ini.token, type, limit, timeout_seconds);
+}
+
+void SignIn(const std::string& account, const std::string& password, bool create) {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!started || state.signing_in) return;
+        state.signing_in = true; state.sign_in_error.clear(); ++state.version;
+    }
+    Notify();
+    std::thread([account, password, create] {
+        const auto ini = ReadSettings();
+        std::string error;
+        if (ini.server.empty()) error = "No server set: put server=http://host:port in HeroesPost.ini in the HotA folder.";
+        else {
+            // Registering as a player from before accounts keeps that player, and with it their games.
+            bool claim = false; { std::lock_guard<std::mutex> lock(mutex); claim = create && state.needs_account; }
+            const auto body = "{\"name\":" + JsonString(Utf8Text(account)) + ",\"password\":" + JsonString(Utf8Text(password)) + "}";
+            const auto r = Request(ini.server, "POST", create ? "/api/account" : "/api/account/sign-in", body, claim ? ini.token : std::string());
+            hp_json::Value v;
+            if (r.status == 200 && hp_json::Parse(r.body, v) && !v["token"].str().empty()) {
+                StoreToken(ini.server, v["token"].str(), v["player"]["displayName"].str());
+                ++identity;
+                // Published before the old connection is dropped: what the new one reports comes
+                // after it and is not overwritten.
+                Publish([](Snapshot& s) {
+                    s.signing_in = false; s.sign_in_error.clear();
+                    s.signed_in = true; s.needs_account = false; s.online = false; s.status = "Signed in. Connecting...";
+                    s.mine.clear(); s.games.clear(); s.chat.clear();
+                });
+                Drop(); Kick();
+                return;
+            }
+            error = GameText(Problem(r));
+        }
+        Publish([&](Snapshot& s) { s.signing_in = false; s.sign_in_error = error; });
+    }).detach();
+}
+void SignOut() {
+    const auto ini = ReadSettings();
+    if (ini.server.empty()) return;
+    StoreToken(ini.server, "");
+    ++identity;
+    Drop();
+    SignedOut("Signed out of " + ini.server + ".");
+    // The server forgets the token too; if that fails, an unused token stays behind on it.
+    if (!ini.token.empty()) std::thread([ini] { Request(ini.server, "POST", "/api/account/sign-out", "", ini.token); }).detach();
+    Kick();
 }
 std::string ProblemText(const Reply& reply) { return GameText(Problem(reply)); }
 Snapshot Get() { std::lock_guard<std::mutex> lock(mutex); return state; }

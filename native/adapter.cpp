@@ -383,6 +383,11 @@ unsigned __stdcall LoadHook(HiHook* hook, void* self, const char* name, unsigned
 void __stdcall MergeFrameHook(HiHook* hook) {
     ++mergeDepth;reinterpret_cast<void(__cdecl*)()>(hook->GetDefaultFunc())();--mergeDepth;
 }
+// HD's loader of its saved PvP options (HD+.Settings) into the options the host's Begin shows.
+void __stdcall PvpOptionsHook(HiHook* hook) {
+    reinterpret_cast<void(__cdecl*)()>(hook->GetDefaultFunc())();
+    hp_lobby::PvpOptionsLoaded();
+}
 unsigned __stdcall ReceiveFrameHook(HiHook* hook,unsigned a,unsigned b,int c,unsigned d,unsigned e) {
     ++receiveDepth;
     const auto result=reinterpret_cast<unsigned(__stdcall*)(unsigned,unsigned,int,unsigned,unsigned)>(hook->GetDefaultFunc())(a,b,c,d,e);
@@ -435,6 +440,7 @@ LRESULT CALLBACK InstallOnGameThread(int code, WPARAM wparam, LPARAM lparam) {
                 if (good) good = hota_start::Install(instance, hdBase.load(), &completionError);
                 if (good) good = hota_adventure::Install(instance, hdBase.load(), &completionError);
                 if (good) good = hota_adventure::ConfigureInputGate(DepartureBlocksGameplay, nullptr, &completionError);
+                if (good) good = hota_adventure::ConfigureCommandGate([](void*) noexcept { return hp_relay::CatchingUp(); }, nullptr, &completionError);
                 if (good) good = hota_departure::Install(instance, hdBase.load(), CanHoldDeparture, DepartureLatched, nullptr, &completionError);
                 if (good) { hooks[5]=instance->WriteHiHook(0x553440,SPLICE_,EXTENDED_,THISCALL_,reinterpret_cast<void*>(ResumePollHook));good=hooks[5]&&hooks[5]->IsApplied(); }
                 if (good) good = hota_adventure::ConfigureIdleBoundary(HoldDepartureAtBoundary, nullptr, &completionError);
@@ -458,7 +464,9 @@ LRESULT CALLBACK InstallOnGameThread(int code, WPARAM wparam, LPARAM lparam) {
                 }
                 if (good && patchMode.load()) {
                     std::string lobbyError;
-                    if (!hp_lobby::Install(hdBase.load(), &lobbyError)) { std::lock_guard<std::mutex> lock(stateMutex); hookError = lobbyError; }
+                    HiHook* pvp = instance->WriteHiHook(hdBase.load()+0x184550, SPLICE_, EXTENDED_, CDECL_, reinterpret_cast<void*>(PvpOptionsHook));
+                    if (!pvp || !pvp->IsApplied()) lobbyError = "pvp_options_hook_failed";
+                    if (!hp_lobby::Install(hdBase.load(), &lobbyError) || !lobbyError.empty()) { std::lock_guard<std::mutex> lock(stateMutex); hookError = lobbyError; }
                 }
                 telemetryState.store(good ? 2 : -1);
             } else {
@@ -641,7 +649,7 @@ std::string Command(const std::string& input) {
     }
     if (command == "resume_session") {
         if(telemetryState.load()!=2||!MenuHasNoWorld())return hp::Error("not_ready","Resume requires a fresh isolated client at its main menu.");
-        const auto path=hp::Parent(hp::ModulePath(nullptr))+L"\\HeroesPost.resume.bin";
+        const auto path=hp::HandoffPath(hp::Parent(hp::ModulePath(nullptr)),hp::ContinueTag(),L"resume.bin");
         if(GetFileAttributesW(path.c_str())==INVALID_FILE_ATTRIBUTES)return hp::Error("missing_resume","No recovery bundle is staged.");
         {std::lock_guard<std::mutex> lock(stateMutex);
          if(captureStatus=="copying"||captureStatus=="writing")return hp::Error("capture_busy","A native capture is still being written.");
@@ -698,6 +706,14 @@ std::string Command(const std::string& input) {
     }
     if (command == "experiment_lobby_click") { hp_lobby::RequestClick(); return "{\"protocol\":1,\"ok\":true}"; }
     if (command == "experiment_players") { hp_lobby::RequestPlayers(); return "{\"protocol\":1,\"ok\":true}"; }
+    // experiment_sign_in__<name>__<password> or experiment_register__<name>__<password>, for the open sign-in
+    // window; the pipe takes only lowercase letters, digits and underscores.
+    if (command.rfind("experiment_sign_in__", 0) == 0 || command.rfind("experiment_register__", 0) == 0) {
+        const auto first = command.find("__"), second = command.find("__", first + 2);
+        if (second == std::string::npos) return hp::Error("bad_request", "Expected <command>__<name>__<password>.");
+        hp_lobby::RequestSignIn(command.substr(first + 2, second - first - 2), command.substr(second + 2), command[11] == 'r');
+        return "{\"protocol\":1,\"ok\":true}";
+    }
     if (command == "experiment_lobby_create" || command == "experiment_lobby_join") {
         hp_lobby::RequestPress(command == "experiment_lobby_create" ? 0 : 1); return "{\"protocol\":1,\"ok\":true}";
     }
@@ -743,7 +759,7 @@ std::string Command(const std::string& input) {
         if (!fingerprintAccepted.load() || telemetryState.load() != 2 || !MenuHasNoWorld())
             return hp::Error("not_ready", "Bootstrap requires the pinned isolated client at the initial menu.");
         hota_request::Settings settings; std::string error;
-        if (!hota_request::Read(hp::Parent(hp::ModulePath(nullptr)) + L"\\HeroesPost.session.ini", settings, &error))
+        if (!hota_request::Read(hp::HandoffPath(hp::Parent(hp::ModulePath(nullptr)), hp::ContinueTag(), L"session.ini"), settings, &error))
             return hp::Error("invalid_bootstrap_request", error);
         hota_session::Request request;
         request.token = ++bootstrapSequence;
@@ -752,7 +768,7 @@ std::string Command(const std::string& input) {
         request.address = settings.address; request.map_basename = settings.map_basename;
         request.port = settings.port;
         if(request.role==hota_session::Role::SoloScaffold && !resume_session::QueueFile(
-            hp::Parent(hp::ModulePath(nullptr))+L"\\HeroesPost.resume.bin",request.token,&error))return hp::Error("resume_rejected",error);
+            hp::HandoffPath(hp::Parent(hp::ModulePath(nullptr)),hp::ContinueTag(),L"resume.bin"),request.token,&error))return hp::Error("resume_rejected",error);
         if (!hota_session::Prepare(request, &error)) return hp::Error("bootstrap_rejected", error);
         if (!hota_menu::Queue(request.token)) {
             hota_session::CancelPrepared(request.token);

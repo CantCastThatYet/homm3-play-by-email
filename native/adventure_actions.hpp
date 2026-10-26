@@ -27,6 +27,9 @@ using Predicate=bool(*)(void*) noexcept;
 // Configure on the installed game thread outside any adventure callback.
 // A true gate skips the entire native dispatch, including idle timeout/AI work.
 bool ConfigureInputGate(Predicate,void* context,std::string* error=nullptr) noexcept;
+// A true gate drops the player's commands (every message but idle); idle work,
+// and with it the network poll, goes on.
+bool ConfigureCommandGate(Predicate,void* context,std::string* error=nullptr) noexcept;
 // Called only before the outermost original idle dispatch. Returning true skips
 // that entire dispatch. The callback may latch a permanent departure hold.
 bool ConfigureIdleBoundary(Predicate,void* context,std::string* error=nullptr) noexcept;

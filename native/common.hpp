@@ -22,6 +22,12 @@ std::string Json(const std::string& s);
 std::wstring ModulePath(HMODULE module);
 std::wstring Canonical(const std::wstring& path, bool directory = false);
 std::wstring Parent(const std::wstring& path);
+// Files a Continue hands to the HotA it restarts, in the game folder: HeroesPost.<tag>.<name>, tagged with
+// the restarting process's id so that HotAs started from one folder never read each other's. The restarted
+// process finds its tag in HEROESPOST_CONTINUE; without one (the desktop app's launches) the file is the
+// plain HeroesPost.<name>.
+std::wstring ContinueTag();
+std::wstring HandoffPath(const std::wstring& folder, const std::wstring& tag, const wchar_t* name);
 bool Within(const std::wstring& child, const std::wstring& directory);
 std::string Sha256(const std::wstring& path);
 std::uint64_t CreationTime(HANDLE process);

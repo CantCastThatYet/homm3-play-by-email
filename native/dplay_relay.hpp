@@ -61,6 +61,9 @@ std::uint32_t SentCount() noexcept;
 // A rejoining client restores its captured seat before it may see game messages:
 // Receive withholds them (system messages still flow) until this is called.
 void ReleaseGameMessages() noexcept;
+// True from the moment a rejoining client claims its seat until it tells the relay it has caught
+// up; the relay ignores the seat's messages until then, so the player's commands wait.
+bool CatchingUp() noexcept;
 // Name of a player in the game a rejoining client entered; the engine's player
 // names are their network names. False if unknown.
 bool RejoinPlayerName(std::uint32_t id, std::string& name);

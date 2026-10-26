@@ -243,20 +243,22 @@ void Prepare(const std::string& id) {
     }
     const auto mapPath = folder + L"\\Maps\\" + Wide(map, CP_ACP);
     if (GetFileAttributesW(mapPath.c_str()) == INVALID_FILE_ATTRIBUTES) { fail("Cannot continue: this game is played on the map " + map + ", which is not in your Maps folder."); return; }
-    if (!WriteFileBytes(folder + L"\\HeroesPost.resume.bin", image.data(), image.size())) { fail("Cannot continue: HeroesPost.resume.bin could not be written."); return; }
-    const auto deferredPath = folder + L"\\HeroesPost.deferred.bin";
+    // Restart hands these to the new HotA under this process's tag.
+    const auto tag = std::to_wstring(GetCurrentProcessId());
+    if (!WriteFileBytes(hp::HandoffPath(folder, tag, L"resume.bin"), image.data(), image.size())) { fail("Cannot continue: the seat could not be written to the HotA folder."); return; }
+    const auto deferredPath = hp::HandoffPath(folder, tag, L"deferred.bin");
     DeleteFileW(deferredPath.c_str());
-    if (deferredCount && !WriteFileBytes(deferredPath, deferred.data(), deferred.size())) { fail("Cannot continue: HeroesPost.deferred.bin could not be written."); return; }
+    if (deferredCount && !WriteFileBytes(deferredPath, deferred.data(), deferred.size())) { fail("Cannot continue: the seat could not be written to the HotA folder."); return; }
     // The restarted HotA reads this as its relay configuration (hp_relay::ReadConfig) plus map, color and game.
     std::string ini = "host=" + snapshot.relay_host + "\r\nport=" + std::to_string(snapshot.relay_port) + "\r\nticket=" + snapshot.ticket +
         "\r\nname=" + snapshot.player + "\r\nrejoin=" + session + "\r\nseat=" + seat + "\r\nfrom=" + std::to_string(from) + "\r\n";
     char seatText[16]; std::snprintf(seatText, sizeof seatText, "%08x", seatId);
     ini += std::string("seatid=") + seatText + "\r\n";
     if (sent != 0xFFFFFFFFu) ini += "sent=" + std::to_string(sent) + "\r\n";
-    if (deferredCount) ini += "deferred=HeroesPost.deferred.bin\r\n";
+    if (deferredCount) ini += "deferred=HeroesPost." + std::to_string(GetCurrentProcessId()) + ".deferred.bin\r\n";
     ini += "map=" + map + "\r\ncolor=" + std::to_string(color) + "\r\ngame=" + gameName + "\r\n";
-    if (!Plain(snapshot.ticket) || !Plain(snapshot.player) || !WriteFileBytes(folder + L"\\HeroesPost.continue.ini", ini.data(), ini.size())) {
-        fail("Cannot continue: HeroesPost.continue.ini could not be written."); return;
+    if (!Plain(snapshot.ticket) || !Plain(snapshot.player) || !WriteFileBytes(hp::HandoffPath(folder, tag, L"continue.ini"), ini.data(), ini.size())) {
+        fail("Cannot continue: the seat could not be written to the HotA folder."); return;
     }
     hp_lobby_client::SetStatus("Restarting HotA into " + gameName + "...");
     ready = true;
@@ -271,8 +273,17 @@ void Fail(const std::string& text) {
 // In the HotA that Restart started: resume the prepared seat once the main menu is up, as the
 // desktop app's NativeHost resume does through the same adapter commands.
 void ResumeAfterRestart() {
-    const auto path = folder + L"\\HeroesPost.continue.ini";
+    const auto tag = hp::ContinueTag();
+    const auto path = hp::HandoffPath(folder, tag, L"continue.ini");
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    // A tagged handoff belongs to this process alone: its files go once the seat is back or has failed.
+    struct Cleanup {
+        std::wstring folder, tag;
+        ~Cleanup() {
+            if (tag.empty()) return;
+            for (const wchar_t* name : {L"continue.ini.done", L"resume.bin", L"deferred.bin", L"session.ini"}) DeleteFileW(hp::HandoffPath(folder, tag, name).c_str());
+        }
+    } cleanup{folder, tag};
     hp_relay::Config config; std::string error;
     const bool read = hp_relay::ReadConfig(path, config, &error);
     std::string map, game; int color = -1;
@@ -308,7 +319,7 @@ void ResumeAfterRestart() {
     const std::wstring session = L"[Session]\r\nVersion=1\r\nAction=SoloScaffold\r\nPlayerName=" + Wide(player, CP_ACP) + L"\r\nSessionName=HeroesPostResume\r\n"
         L"Address=127.0.0.1\r\nMapFile=" + Wide(map, CP_ACP) + L"\r\nPort=26777\r\n";
     std::wstring bom = L"\xFEFF" + session;
-    if (!WriteFileBytes(folder + L"\\HeroesPost.session.ini", bom.data(), bom.size() * sizeof(wchar_t))) { Fail("HeroesPost.session.ini could not be written."); return; }
+    if (!WriteFileBytes(hp::HandoffPath(folder, tag, L"session.ini"), bom.data(), bom.size() * sizeof(wchar_t))) { Fail("The session file could not be written to the HotA folder."); return; }
     until = deadline(30000);
     while (!Ok("bootstrap_session")) {
         if (GetTickCount64() > until) { Fail("HotA could not start the game from its main menu."); return; }
@@ -390,9 +401,11 @@ void Restart() {
     std::wstring line = GetCommandLineW();
     // The new process's version.dll waits for this one to be gone before the game starts.
     SetEnvironmentVariableW(L"HEROESPOST_WAIT_PID", std::to_wstring(GetCurrentProcessId()).c_str());
+    // And finds the seat Prepare wrote under this process's tag.
+    SetEnvironmentVariableW(L"HEROESPOST_CONTINUE", std::to_wstring(GetCurrentProcessId()).c_str());
     STARTUPINFOW startup{}; startup.cb = sizeof startup; PROCESS_INFORMATION process{};
     if (!CreateProcessW(exe, line.data(), nullptr, nullptr, FALSE, 0, nullptr, directory, &startup, &process)) {
-        SetEnvironmentVariableW(L"HEROESPOST_WAIT_PID", nullptr);
+        SetEnvironmentVariableW(L"HEROESPOST_WAIT_PID", nullptr); SetEnvironmentVariableW(L"HEROESPOST_CONTINUE", nullptr);
         ready = false; continuing = false;
         hp_lobby_client::SetStatus("Cannot continue: HotA could not be started again.");
         return;

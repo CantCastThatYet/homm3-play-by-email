@@ -47,6 +47,16 @@ std::wstring Canonical(const std::wstring& p, bool directory) {
     return out;
 }
 std::wstring Parent(const std::wstring& p) { auto n = p.find_last_of(L"\\/"); return n == p.npos ? L"" : p.substr(0, n); }
+std::wstring ContinueTag() {
+    wchar_t value[16]{};
+    const DWORD n = GetEnvironmentVariableW(L"HEROESPOST_CONTINUE", value, 16);
+    std::wstring tag;
+    if (n && n < 16) for (const wchar_t* c = value; *c; ++c) if (*c >= L'0' && *c <= L'9') tag += *c;
+    return tag;
+}
+std::wstring HandoffPath(const std::wstring& folder, const std::wstring& tag, const wchar_t* name) {
+    return folder + L"\\HeroesPost." + (tag.empty() ? L"" : tag + L".") + name;
+}
 bool Within(const std::wstring& child, const std::wstring& dir) {
     std::wstring prefix = dir;
     if (prefix.empty()) return false;

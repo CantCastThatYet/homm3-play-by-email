@@ -116,6 +116,15 @@ Message Wait(IDP4* dp, DWORD timeoutMs = 5000) {
     }
     return m;
 }
+// The next game message, skipping system messages.
+Message WaitGame(IDP4* dp, DWORD timeoutMs = 5000) {
+    const auto deadline = GetTickCount64() + timeoutMs;
+    for (;;) {
+        const auto now = GetTickCount64(); if (now >= deadline) return {};
+        auto m = Wait(dp, static_cast<DWORD>(deadline - now));
+        if (m.hr != S_OK || m.from != 0) return m;
+    }
+}
 DWORD At(const Message& m, size_t offset) { DWORD v = 0; if (m.data.size() >= offset + 4) std::memcpy(&v, m.data.data() + offset, 4); return v; }
 const char* Ptr(const Message& m, size_t offset) { return reinterpret_cast<const char*>(static_cast<std::uintptr_t>(At(m, offset))); }
 
@@ -273,6 +282,39 @@ int main(int argc, char** argv) {
     Check(hp_relay::ReconnectCount() > reconnects && !hp_relay::Reconnecting(), "the client reconnected by itself");
     Check(Wait(blue, 500).hr == NoMessages && Wait(red, 500).hr == NoMessages, "no session loss and no duplicates");
     red->Release(); blue->Release();
+
+    // A seat claimed back with nothing to replay (Continue where the player left): the relay
+    // ignores what the new process sends until it has caught up, which it says by itself once
+    // its engine has polled for five seconds, without a message of its own to carry it.
+    hp_relay::CreateDirectPlay(config, &raw); auto keeper = static_cast<IDP4*>(raw);
+    hp_relay::CreateDirectPlay(config, &raw); auto leaver = static_cast<IDP4*>(raw);
+    keeper->InitializeConnection(address.data(), 0); leaver->InitializeConnection(address.data(), 0);
+    char catchName[] = "Catch-up test"; DPSESSIONDESC2 third = desc; third.name = catchName;
+    Check(SUCCEEDED(keeper->Open(&third, 2)), "third session created");
+    DPID keeperId = 0; keeper->CreatePlayer(&keeperId, &hn, nullptr, nullptr, 0, 0x100);
+    Named catching{"Catch-up test"}; leaver->EnumSessions(&filter, 0, OnNamedSession, &catching, 0x42);
+    DPSESSIONDESC2 joinThird{}; joinThird.dwSize = sizeof joinThird; joinThird.instance = catching.instance;
+    Check(catching.found && SUCCEEDED(leaver->Open(&joinThird, 1)), "third peer joins");
+    DPID leaverId = 0; leaver->CreatePlayer(&leaverId, &pn, nullptr, nullptr, 0, 0);
+    Wait(keeper);
+    std::memcpy(start + 4, &keeperId, 4); keeper->Send(keeperId, 0, 1, start, sizeof start);
+    Check(WaitGame(leaver).data.size() == sizeof start, "the third game starts");
+    leaver->Close(); leaver->Release();
+    hp_relay::Config continuing = config; continuing.rejoin_session = "Catch-up test"; continuing.rejoin_seat = "Blue"; continuing.rejoin_from = 1; continuing.rejoin_sent = 0;
+    hp_relay::CreateDirectPlay(continuing, &raw); auto returned = static_cast<IDP4*>(raw);
+    returned->InitializeConnection(address.data(), 0);
+    Check(SUCCEEDED(returned->Open(&third, 2)), "the player continues");
+    DPID returnedId = 0;
+    Check(SUCCEEDED(returned->CreatePlayer(&returnedId, &pn, nullptr, nullptr, 0, 0)) && returnedId == leaverId && hp_relay::CatchingUp(),
+          "the seat is claimed back and catching up");
+    char repeat[] = "repeat"; returned->Send(returnedId, keeperId, 1, repeat, sizeof repeat);
+    Check(WaitGame(keeper, 1000).hr == NoMessages, "what it sends while catching up is not delivered");
+    Check(Wait(returned, 6000).hr == NoMessages && !hp_relay::CatchingUp(), "it catches up with nothing to replay and nothing to send");
+    char fresh[] = "fresh"; returned->Send(returnedId, keeperId, 1, fresh, sizeof fresh);
+    got = WaitGame(keeper);
+    Check(got.hr == S_OK && got.from == returnedId && got.data.size() == sizeof fresh && std::memcmp(got.data.data(), fresh, sizeof fresh) == 0,
+          "its next message reaches the other player");
+    keeper->Release(); returned->Release();
 
     peer->Release(); host->Release(); lobby->Release();
     std::printf(failures ? "%d FAILED\n" : "ALL PASSED\n", failures);

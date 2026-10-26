@@ -221,11 +221,11 @@ launcher and no desktop app:
   start-up but passes every call through to DirectPlay. The lobby switches it on just
   before it drives HotA's own TCP/IP screens. Choosing a connection type by hand switches
   it off again, so normal TCP/IP and the HD+ online lobby are unchanged.
-- **Server and identity.** `HeroesPost.ini` in the HotA folder holds `server=http://host:port`.
-  It is created empty on first start. The first time the lobby opens, the game registers
-  the name from HotA's multiplayer screen (`POST /api/players`) and writes `token=` and
-  `token_server=` back to the same file. If the server no longer knows the token, it
-  registers again.
+- **Server.** `HeroesPost.ini` in the HotA folder holds `server=http://host:port`. It is
+  created empty on first start.
+- **Accounts.** A player is an account on the server: a name and a password that sign in
+  from any HotA (see [Accounts](#accounts)). The game folder holds no identity, so players
+  can take turns at one HotA folder.
 - **The button.** A Heroes Post button sits below Direct Connection in HotA's multiplayer
   screen. Its art is put together at run time from the player's own files: the frame of
   the connection buttons, plain gold from the Cancel button, and the spell scroll
@@ -239,7 +239,7 @@ launcher and no desktop app:
     once started;
   - lobby chat;
   - a hint bar;
-  - the buttons **Create**, **Join**, **Continue**, **Turn limit** and **Close**.
+  - the buttons **Create**, **Join**, **Continue**, **Turn limit**, **Sign out** and **Close**.
 
 - **Push, not polling.** The first time the window opens, a worker thread
   (`native/lobby_client.cpp`) opens its own TCP connection to the game relay, separate from
@@ -336,12 +336,30 @@ have the real thing, and the announcements set them back. In testing, a live cli
 resumed seat's world transfer failed to load it ("Save file ... was read with errors").
 
 So the relay delivers nothing a claiming process sends until that process reports `CaughtUp`.
-The rejoin reply tells the client how many frames the relay will replay. The DirectPlay
-replacement sends `CaughtUp` before its first message once the engine has consumed all of them,
-plus five seconds. If a process never reports, the relay gives up after three minutes. The other
-players see exactly what they saw before the player left. This replaces delivering every
-re-sent message, which also explains the earlier unexplained warning about 174 of 176 sent
-messages.
+The rejoin reply tells the client how many frames the relay will replay. The five-second timer
+starts once the restored seat has been given the game's messages and the engine has consumed all
+of the replayed frames; with nothing to replay, it starts at that release. When it runs out, the
+DirectPlay replacement sends `CaughtUp` from the engine's next poll, without waiting for a message
+of its own. If the connection drops, `CaughtUp` is sent again at its place among the resent
+messages. Until then the player's map commands are dropped (`hota_adventure::ConfigureCommandGate`);
+idle processing, and with it the network poll, goes on. A click in those seconds does nothing,
+instead of producing a move or End Turn the relay would discard. If a process never reports, the
+relay gives up after three minutes. The other players see exactly what they saw before the player
+left. This replaces delivering every re-sent message, which also explains the earlier unexplained
+warning about 174 of 176 sent messages.
+
+The first version sent `CaughtUp` only on the seat's next message, at least five seconds after the
+last replayed frame was consumed. With nothing to replay, no frame was ever consumed, so the timer
+never started. The relay then discarded everything for three minutes, including End Turn, and the
+day stuck. Checked 2026-10-26 with two patched HotAs and accounts:
+
+- Blue continued on day 1 with 0 frames to replay and reported catching up 5.0 s after the
+  release. The relay discarded only the `0x8A4` announcement. Both ended day 1 and reached day 2.
+- Blue left on day 2 and Red ended the day. Blue continued with 4 frames to replay. A real click on
+  End Turn 3.2 s into the window did nothing. A click after catching up opened HotA's confirmation,
+  and both reached day 3. Both clients' resources and heroes for both players were identical.
+- `Native.RelayTest` covers the case without a game: a seat claimed back with nothing to replay
+  catches up while only polling; its message from before is not delivered and its next one is.
 
 ### Seat saving in the patch
 
@@ -365,9 +383,11 @@ plays the seat.
    `/claim` does, builds the resume image from the latest capture (`NativeResumeImage`, now shared
    with `NativeHost resume`) and returns one package (`ResumePackage.cs`): the image, the queued
    messages, the replay start, the sent count, the map and the seat id.
-2. The patch checks that the map is installed. It writes `HeroesPost.resume.bin`,
-   `HeroesPost.deferred.bin` and `HeroesPost.continue.ini`, and restarts HotA with the same command
-   line. `version.dll` in the new process waits for the old one to exit before the game starts.
+2. The patch checks that the map is installed. It writes `HeroesPost.<pid>.resume.bin`,
+   `HeroesPost.<pid>.deferred.bin` and `HeroesPost.<pid>.continue.ini`, tagged with its own process
+   id, and restarts HotA with the same command line and `HEROESPOST_CONTINUE=<pid>`, so only that
+   HotA reads them. `version.dll` in the new process waits for the old one to exit before the game
+   starts.
 3. The new process renames the ini so a failure cannot loop, waits for the main menu, and then:
    - turns the relay on with `rejoin=`, `seat=` and `seatid=`;
    - runs the same adapter commands `NativeHost resume` uses;
@@ -393,6 +413,78 @@ when) or StandIn.
 - **F7** opens a players window. It shows each seat's name and color, whether they are in the
   game or away and for how long, and whether their turn is ended (from HD's simultaneous-turn
   rows).
+
+### Accounts
+
+A player is an account: a name and a password. Any HotA signs in to it, so the same player
+continues their games from another computer, and players taking turns at one HotA folder stay
+apart.
+
+- **Server** (`Accounts.cs`). `POST /api/account` registers a name and password and returns a
+  token; `POST /api/account/sign-in` returns a new token for the account; `POST
+  /api/account/sign-out` ends the calling token only; `GET /api/account` says whose a token is.
+  Every sign-in has its own token, and only token hashes are stored (table `tokens`).
+  Passwords are PBKDF2 hashes, as game passwords are. Names are 3 to 20 Latin letters, digits,
+  spaces, dots, dashes or underscores, unique regardless of case, so HotA in any code page can
+  show them. Registering and signing in are limited to 20 tries a minute per address.
+- **Players from before accounts** (made by `POST /api/players`) keep their id and their games:
+  registering while signed in with their token turns that player into the account. The
+  database upgrade (`user_version` 2) moves version 1's one token per player into `tokens`.
+- **Where the sign-in is kept.** Not in the HotA folder: in the Windows user's
+  `%LOCALAPPDATA%\HeroesPost\accounts.ini`, one line per server with its token and the
+  account name, which stays after signing out to be offered next time. `HEROES_POST_PROFILE`
+  names another directory for it, as it does for the desktop app. A `token=` left in
+  `HeroesPost.ini` by an older patch moves there on start.
+- **In the game.** Opening Heroes Post without a sign-in for the server shows a sign-in window:
+  account name, password, **Sign in**, **Register** and **Cancel**. The password is typed into
+  an engine edit that never draws itself; a canvas over it shows one star per character. A
+  player from before accounts sees the same window, worded to register and keep their games.
+  If the server stops accepting the sign-in (signed out elsewhere, a new database), the lobby
+  closes and the window opens. **Sign out** in the lobby ends the sign-in on the server and
+  returns to the window.
+- **The lobby's windows and the screen.** HotA keeps no copy of the main menu's art under its
+  dialogs (the window manager's backup screen is null), and the lobby is larger than the
+  multiplayer dialog under it, so its edges used to stay on the menu after it closed. The patch
+  saves the screen before its windows open and puts it back after each closes.
+- **In-game names.** When the lobby starts a game it writes the account's name into HotA's
+  player name field, so every player appears in the game under their account name. HotA's own
+  multiplayer name is kept per folder, so on its own it cannot tell players apart.
+
+Two HotAs running at once on one PC break each other's drawing when their windows swap focus:
+the main menu under a dialog loses its buttons and text, or a dialog's area stays blank, and it
+stays broken when the window gets focus back. Without the patch, from two folders, both on HotA's
+multiplayer screen and then six focus swaps straight away: the first-started HotA was damaged in
+9 of 9 runs, in full-screen and in windowed mode alike. One HotA swapping with Notepad at the same
+timing was intact in 3 of 3; swaps started after a pause sometimes leave both intact. The cause
+is not known. Ruled out: shared DLL sections, files written on focus changes, the named event
+`Heroes III` (WinMain's single-instance check; nothing else uses it) and the named section every
+HotA opens (Explorer opens it too). It matters for testing two players on one PC, not for players
+on their own computers: test on two machines or a virtual machine.
+
+Checked 2026-10-26, two HotAs with their own `HEROES_POST_PROFILE`, first from one folder and
+then from two:
+a typed password showed as stars; registering, a wrong password and a taken name behaved as
+above; a player from before accounts kept their id; Red hosted and Blue joined as
+"redplayer" and "bluekeeper"; Blue left and pressed Continue while Red played on, and its
+tagged files were used and then deleted; Sign out made the old token invalid and the window
+offered "redplayer" again.
+
+### Simultaneous turns are on
+
+Seats can only be saved during simultaneous turns, so a game hosted with the lobby's **Create** starts
+with them on. HD loads the PvP options that the host's Begin shows (and then sends to every player)
+from its saved `HD+.Settings`. Entry 13 is the tick, written to `hd+0x21000a`. Entry 12 is the end
+date as a day number, which HD converts to the dialog's "month week day" digits at `hd+0x21000e`.
+The patch hooks that loader (`hd+0x184550`). When the lobby's Create started the setup, the patch
+then ticks the option and sets the end date to 9 4 7 (day 252), the latest the dialog takes.
+
+The host still sees the dialog and could untick it; the patch then warns in the game as before. HD
+saves the accepted options as usual, so the host's copy remembers them for its next game, as if
+they had been ticked by hand. Games set up through HotA's own TCP/IP buttons are not touched.
+
+Checked 2026-10-26: the host's saved options were "off, 1 1 6". The dialog opened ticked with
+947, both clients held day 252 and simultaneous turns, each patch uploaded its day-1 capture, and
+both players ended day 1 and reached day 2.
 
 ### Leaving
 
@@ -436,10 +528,8 @@ restart.
 
 ### Not yet done
 
-- **Simultaneous turns must be ticked by the host** in HD's PvP options (the Create hint says
-  so). Without them seats cannot be saved, and the patch warns in the game. They are not yet
-  switched on automatically for Heroes Post games. Leaving and returning also stops working once
-  simultaneous turns end (their end date, or contact between players).
+- Leaving and returning stops working once simultaneous turns end: after day 252, or when
+  players come into contact. A host who unticks them in the PvP options gets a game without them.
 - Captures are uploaded uncompressed (2.5 MB on a 72x72 map, at most every ten seconds while
   acting).
 - A player who quits mid-turn still loses what they did since the last capture (at most about
@@ -451,6 +541,9 @@ restart.
 - Not yet tested: contact between human players; more than two humans; a stand-in's battles
   against a human; Continue on a map whose file name is not plain ASCII (the scaffold request
   takes ASCII names only).
-- The player's lobby token is stored in plain text in `HeroesPost.ini` and the continue file.
+- A sign-in token is stored in plain text in the Windows user's `accounts.ini` and, during a
+  Continue, in the tagged continue file.
+- There is no way yet to change a password or recover a forgotten one, and the desktop app
+  still makes players without accounts (`POST /api/players`).
 - HD's start-up update check once replaced `HD_HOTA.dll` in a test copy. The launcher now sets
   `<Update.CheckAtStart> = 0` in owned copies.

@@ -141,6 +141,23 @@ void PaintLabel(H3DlgPcx16* item, H3LoadedPcx16* back, const std::string& text, 
 }
 std::atomic<int> devPress{-1};
 
+// A gold button with its label, greyed out when disabled and darkened while held down.
+void PaintGoldButton(H3DlgPcx16* item, H3LoadedPcx16* back, const std::string& label, bool enabled, bool down) {
+    if (!item) return;
+    auto* pcx = item->GetPcx(); const int w = item->GetWidth(), h = item->GetHeight();
+    TakeBackground(item, back);
+    PaintGold(pcx, w, h);
+    if (down) pcx->DarkenArea(0, 0, w, h, 50);
+    if (!enabled) { pcx->GrayScaleArea(0, 0, w, h); pcx->DarkenArea(0, 0, w, h, 40); }
+    const int shift = down ? 1 : 0;
+    pcx->TextDraw(H3MediumFont::Get(), label.c_str(), shift, shift, w, h, enabled ? eTextColor::BLACK : eTextColor::GRAY, eTextAlignment::MIDDLE_CENTER);
+}
+// HD's dark hint strip at the bottom of a window, like the multiplayer screen's.
+void PaintHintStrip(H3LoadedPcx16* back, int x, int y, int w) {
+    back->FillRectangle(x, y, w, 20, 0, 0, 0);
+    back->DrawFrame(x - 1, y - 1, w + 2, 22, 148, 116, 56);
+}
+
 std::string NoBraces(std::string s) {
     // Braces switch HotA's text colour; players' text must not.
     std::replace(s.begin(), s.end(), '{', '(');
@@ -173,7 +190,7 @@ std::string Duration(int seconds) {
 }
 
 // ------------------------------------------------------------- lobby window
-enum class Action { None, Create, Join };
+enum class Action { None, Create, Join, SignIn, SignOut };
 struct Choice { Action action = Action::None; std::string game; };
 
 class LobbyDlg : public H3Dlg {
@@ -182,12 +199,7 @@ public:
     explicit LobbyDlg(const std::string& player) : H3Dlg(W, H, -1, -1, FALSE, FALSE) {
         // H3API's blue frame expects 64-pixel tiles with status-bar pieces; HD's has neither.
         AddBackground(0, 0, W, H, FALSE, FALSE, 0, TRUE);
-        if (auto* back = GetBackgroundPcx()) {
-            PaintBlueFrame(back, W, H);
-            // A dark hint strip like the multiplayer screen's, sunk into the background.
-            back->FillRectangle(HintX, HintY, W - 2 * HintX, 20, 0, 0, 0);
-            back->DrawFrame(HintX - 1, HintY - 1, W - 2 * HintX + 2, 22, 148, 116, 56);
-        }
+        if (auto* back = GetBackgroundPcx()) { PaintBlueFrame(back, W, H); PaintHintStrip(back, HintX, HintY, W - 2 * HintX); }
         CreateText(0, 14, W, 32, "Heroes Post", NH3Dlg::Text::BIG, eTextColor::GOLD, 0);
         status = Canvas(this, 20, 46, W - 40, 18, 0);
         hint = Canvas(this, HintX, HintY, W - 2 * HintX, 20, 0);
@@ -203,14 +215,15 @@ public:
             eTextAlignment::MIDDLE_LEFT, "PassEdBk.pcx", EditId, FALSE, 0, 0);
         // Created this way the field takes keys but would not repaint them.
         if (edit) edit->SetAutoredraw(TRUE);
-        const char* labels[] = {"Create", "Join", "Continue", "Turn limit", "Close"};
+        const char* labels[] = {"Create", "Join", "Continue", "Turn limit", "Sign out", "Close"};
         for (int i = 0; i < ButtonCount; ++i) {
             buttons[i].label = labels[i];
-            buttons[i].item = Canvas(this, Left + i * (ButtonW2 + 10), ButtonsY, ButtonW2, 32, 0);
+            buttons[i].item = Canvas(this, Left + i * (ButtonW2 + ButtonGap), ButtonsY, ButtonW2, 32, 0);
         }
         snapshot = hp_lobby_client::Get();
         hp_lobby_client::Open(player);
         Refresh(true);
+        ShowHint(Hint(-1, -1));
     }
     ~LobbyDlg() { hp_lobby_client::Close(); }
     Choice choice;
@@ -219,6 +232,8 @@ protected:
     BOOL OnCreate() override { if (edit) edit->SetFocus(TRUE); return TRUE; }
     BOOL OnMouseHover(INT32 x, INT32 y) override {
         Refresh(false);
+        // Signed out, or signed in as a player from before accounts: the sign-in window takes over.
+        if (!snapshot.server.empty() && (!snapshot.signed_in || snapshot.needs_account)) { choice = {Action::SignIn, ""}; Stop(); return FALSE; }
         const int dev = devPress.exchange(-1);
         if (dev >= 0) {
             if (dev == Join && SelectedGame() == nullptr && !snapshot.games.empty()) { game = 0; UpdateButtons(); }
@@ -236,6 +251,7 @@ protected:
         const int x = msg.GetX() - GetX(), y = msg.GetY() - GetY();
         if (IsLeftDown(msg)) {
             pressed = ButtonAt(x, y);
+            if (pressed >= 0) hp_keeper::Log("Lobby: " + buttons[pressed].label + (buttons[pressed].enabled ? " pressed" : " pressed while disabled"));
             if (pressed >= 0 && buttons[pressed].enabled) { PaintButton(pressed, true); return TRUE; }
             pressed = -1;
             if (edit && x >= ChatX && x < ChatX + ChatW && y >= EditY && y < EditY + 22) edit->SetFocus(TRUE);
@@ -243,7 +259,8 @@ protected:
         } else if (IsLeftUp(msg) && pressed >= 0) {
             const int which = pressed; pressed = -1;
             PaintButton(which, false);
-            if (ButtonAt(x, y) == which && Press(which)) { Stop(); return FALSE; }
+            if (ButtonAt(x, y) != which) { hp_keeper::Log("Lobby: " + buttons[which].label + " released elsewhere"); return TRUE; }
+            if (Press(which)) { Stop(); return FALSE; }
         }
         return TRUE;
     }
@@ -251,8 +268,8 @@ protected:
 private:
     static constexpr int Left = 22, ListW = 370, RowH = 22, MineY = 90, MineRows = 4, GamesY = 226, GameRows = 6;
     static constexpr int ChatX = 410, ChatW = 208, ChatH = 252, EditY = MineY + ChatH + 6, EditId = 40;
-    static constexpr int HintX = 12, HintY = H - 33, ButtonCount = 5, ButtonW2 = 110, ButtonsY = HintY - 10 - 32;
-    enum { Create, Join, Continue, TurnLimit, Close };
+    static constexpr int HintX = 12, HintY = H - 33, ButtonCount = 6, ButtonW2 = 92, ButtonGap = 8, ButtonsY = HintY - 10 - 32;
+    enum { Create, Join, Continue, TurnLimit, SignOut, Close };
     struct GoldButton { H3DlgPcx16* item = nullptr; std::string label; bool enabled = true; };
 
     hp_lobby_client::Snapshot snapshot;
@@ -357,22 +374,17 @@ private:
         buttons[Continue].enabled = snapshot.online && m && m->started && (m->state == "Away" || m->state == "StandIn") && !hp_keeper::Continuing();
         buttons[TurnLimit].enabled = snapshot.online && m;
         buttons[TurnLimit].label = m ? "Turn: " + Duration(m->turn_seconds) : "Turn limit";
+        buttons[SignOut].enabled = snapshot.signed_in;
         for (int i = 0; i < ButtonCount; ++i) PaintButton(i, false, false);
     }
     void PaintButton(int i, bool down, bool show = true) {
         auto& b = buttons[i]; if (!b.item) return;
-        auto* pcx = b.item->GetPcx();
-        TakeBackground(b.item, GetBackgroundPcx());
-        PaintGold(pcx, ButtonW2, 32);
-        if (down) pcx->DarkenArea(0, 0, ButtonW2, 32, 50);
-        if (!b.enabled) { pcx->GrayScaleArea(0, 0, ButtonW2, 32); pcx->DarkenArea(0, 0, ButtonW2, 32, 40); }
-        const int shift = down ? 1 : 0;
-        pcx->TextDraw(H3MediumFont::Get(), b.label.c_str(), shift, shift, ButtonW2, 32, b.enabled ? eTextColor::BLACK : eTextColor::GRAY, eTextAlignment::MIDDLE_CENTER);
+        PaintGoldButton(b.item, GetBackgroundPcx(), b.label, b.enabled, down);
         if (show) Show(b.item);
     }
     int ButtonAt(int x, int y) const {
         for (int i = 0; i < ButtonCount; ++i) {
-            const int bx = Left + i * (ButtonW2 + 10);
+            const int bx = Left + i * (ButtonW2 + ButtonGap);
             if (x >= bx && x < bx + ButtonW2 && y >= ButtonsY && y < ButtonsY + 32) return i;
         }
         return -1;
@@ -416,6 +428,7 @@ private:
         case Continue:
             if (const auto* m = SelectedMine()) { hp_keeper::Continue(m->id); UpdateButtons(); }
             return false;
+        case SignOut: choice = {Action::SignOut, ""}; return true;
         case Close: return true;
         default: return false;
         }
@@ -436,7 +449,7 @@ private:
     }
     std::string Hint(int x, int y) const {
         switch (ButtonAt(x, y)) {
-        case Create: return "Host a new game. Tick Simultaneous turns in PvP options: only then can players leave and return.";
+        case Create: return "Host a new game. Keep Simultaneous turns ticked in PvP options: only then can players leave and return.";
         case Join: return SelectedGame() ? "Join the selected game." : "Select a game below to join it.";
         case Continue: {
             const auto* m = SelectedMine();
@@ -448,6 +461,7 @@ private:
         }
         case TurnLimit: return SelectedMine() ? "How long the server waits for a player who left before ending their turn. Click to change."
                                              : "Select one of your games to change its turn limit.";
+        case SignOut: return "Sign out of " + NoBraces(snapshot.account) + ". Your games stay yours: sign in again on any computer.";
         case Close: return "Back to the multiplayer menu.";
         default: break;
         }
@@ -460,6 +474,191 @@ private:
         if (list == 1 && row >= 0 && row < static_cast<int>(snapshot.games.size()))
             return snapshot.games[row].started ? "This game is under way." : "Double-click to join.";
         return "Heroes Post: simultaneous turns, chat, and leave or return at any time.";
+    }
+};
+
+// ------------------------------------------------------------ sign-in window
+// Shown before the lobby when this Windows user has no sign-in for the server, or is signed in as a
+// player from before accounts. The password is typed into an engine edit that never draws itself:
+// a canvas over it shows one star per character instead.
+std::atomic<int> devSignIn{-1};
+std::string devAccount, devPassword; // set before devSignIn
+
+class SignInDlg : public H3Dlg {
+public:
+    static constexpr int W = 420, H = 330;
+    explicit SignInDlg(const std::string& player) : H3Dlg(W, H, -1, -1, FALSE, FALSE) {
+        AddBackground(0, 0, W, H, FALSE, FALSE, 0, TRUE);
+        if (auto* back = GetBackgroundPcx()) { PaintBlueFrame(back, W, H); PaintHintStrip(back, HintX, HintY, W - 2 * HintX); }
+        CreateText(0, 14, W, 32, "Heroes Post", NH3Dlg::Text::BIG, eTextColor::GOLD, 0);
+        info = Canvas(this, 30, 48, W - 60, 46, 0);
+        hint = Canvas(this, HintX, HintY, W - 2 * HintX, 20, 0);
+        CreateText(FieldX, NameY - 20, FieldW, 18, "Account name", NH3Dlg::Text::MEDIUM, eTextColor::GOLD, 0, eTextAlignment::MIDDLE_LEFT);
+        CreateText(FieldX, PassY - 20, FieldW, 18, "Password", NH3Dlg::Text::MEDIUM, eTextColor::GOLD, 0, eTextAlignment::MIDDLE_LEFT);
+        if (auto* field = Canvas(this, FieldX, NameY, FieldW, 22, 0)) { TakeBackground(field, GetBackgroundPcx()); PaintPanel(field->GetPcx(), FieldW, 22); }
+        snapshot = hp_lobby_client::Get();
+        // HotA's own multiplayer name belongs to the folder, which several players may share: it is only a guess.
+        const std::string initial = !snapshot.account.empty() ? snapshot.account : !snapshot.remembered_account.empty() ? snapshot.remembered_account
+            : snapshot.needs_account ? snapshot.player : player;
+        name = CreateEdit(FieldX + 6, NameY + 2, FieldW - 12, 18, 20, initial.c_str(), NH3Dlg::Text::SMALL, eTextColor::REGULAR,
+            eTextAlignment::MIDDLE_LEFT, "PassEdBk.pcx", NameId, FALSE, 0, 0);
+        if (name) name->SetAutoredraw(TRUE);
+        password = CreateEdit(FieldX + 6, PassY + 2, FieldW - 12, 18, 64, "", NH3Dlg::Text::SMALL, eTextColor::REGULAR,
+            eTextAlignment::MIDDLE_LEFT, "PassEdBk.pcx", PassId, FALSE, 0, 0);
+        stars = Canvas(this, FieldX, PassY, FieldW, 22, 0);
+        const char* names[] = {"Sign in", "Register", "Cancel"};
+        for (int i = 0; i < ButtonCount; ++i) {
+            labels[i] = names[i];
+            buttons[i] = Canvas(this, ButtonsX + i * (ButtonW + ButtonGap), ButtonsY, ButtonW, 32, 0);
+        }
+        hp_lobby_client::Open(player);
+        Refresh(true);
+        PaintStars();
+        ShowHint(Hint(-1, -1));
+    }
+    ~SignInDlg() { hp_lobby_client::Close(); }
+    bool done = false; // signed in
+
+protected:
+    // A remembered name leaves only the password to type.
+    BOOL OnCreate() override { Focus(name && name->GetText()[0] && !snapshot.needs_account); return TRUE; }
+    BOOL OnMouseHover(INT32 x, INT32 y) override {
+        if (Refresh(false)) { Stop(); return FALSE; }
+        const int dev = devSignIn.exchange(-1);
+        if (dev >= 0) {
+            if (name) { name->SetText(devAccount.c_str()); Show(name); }
+            if (password) password->SetText(devPassword.c_str());
+            PaintStars();
+            if (Press(dev)) { Stop(); return FALSE; }
+        }
+        ShowHint(Hint(x - GetX(), y - GetY()));
+        return TRUE;
+    }
+    BOOL OnKeyPress(eVKey key, eMsgFlag) override {
+        if (key == NH3VKey::H3VK_ENTER) { if (Press(SignInButton)) { Stop(); return FALSE; } return TRUE; }
+        if (key == NH3VKey::H3VK_ESCAPE) { Stop(); return FALSE; }
+        if (key == NH3VKey::H3VK_TAB) { Focus(!onPassword); return TRUE; }
+        return TRUE;
+    }
+    BOOL DialogProc(H3Msg& msg) override {
+        PaintStars();
+        const int x = msg.GetX() - GetX(), y = msg.GetY() - GetY();
+        if (IsLeftDown(msg)) {
+            pressed = ButtonAt(x, y);
+            if (pressed >= 0) hp_keeper::Log("Sign-in window: " + labels[pressed] + (Enabled() ? " pressed" : " pressed while signing in"));
+            if (pressed >= 0 && Enabled()) { PaintButton(pressed, true); return TRUE; }
+            pressed = -1;
+            if (x >= FieldX && x < FieldX + FieldW) {
+                if (y >= NameY && y < NameY + 22) Focus(false);
+                else if (y >= PassY && y < PassY + 22) Focus(true);
+            }
+        } else if (IsLeftUp(msg) && pressed >= 0) {
+            const int which = pressed; pressed = -1;
+            PaintButton(which, false);
+            if (ButtonAt(x, y) == which && Press(which)) { Stop(); return FALSE; }
+        }
+        return TRUE;
+    }
+
+private:
+    static constexpr int FieldX = 60, FieldW = W - 120, NameY = 122, PassY = 172, NameId = 41, PassId = 42;
+    static constexpr int HintX = 12, HintY = H - 33, ButtonCount = 3, ButtonW = 110, ButtonGap = 15;
+    static constexpr int ButtonsX = (W - ButtonCount * ButtonW - (ButtonCount - 1) * ButtonGap) / 2, ButtonsY = HintY - 14 - 32;
+    enum { SignInButton, RegisterButton, CancelButton };
+
+    hp_lobby_client::Snapshot snapshot;
+    unsigned shown = ~0u;
+    H3DlgPcx16 *info = nullptr, *hint = nullptr, *stars = nullptr, *buttons[ButtonCount]{};
+    std::string labels[ButtonCount], hintShown, problem;
+    H3DlgEdit *name = nullptr, *password = nullptr;
+    bool onPassword = false, waiting = false;
+    int pressed = -1;
+    size_t starsShown = ~size_t(0); bool caretShown = false;
+
+    bool Enabled() const { return !snapshot.signing_in; }
+    // True when signed in and the window should close.
+    bool Refresh(bool force) {
+        auto fresh = hp_lobby_client::Get();
+        if (!force && fresh.version == shown) return false;
+        snapshot = std::move(fresh); shown = snapshot.version;
+        if (waiting && !snapshot.signing_in) {
+            waiting = false;
+            if (snapshot.sign_in_error.empty() && snapshot.signed_in) { hp_keeper::Log("Signed in"); done = true; return true; }
+            problem = snapshot.sign_in_error;
+            hp_keeper::Log("Sign-in refused: " + problem);
+        }
+        PaintInfo();
+        for (int i = 0; i < ButtonCount; ++i) PaintButton(i, false, !force);
+        return false;
+    }
+    void PaintInfo() {
+        std::string text;
+        if (snapshot.signing_in) text = "Signing in...";
+        else if (!problem.empty()) text = "{" + NoBraces(problem) + "}";
+        else if (snapshot.needs_account) text = "You played on this server before accounts. Register a name and password to keep your games, or sign in to another account.";
+        else text = "Sign in to " + snapshot.server + ", or register a new account. Your account works from any computer.";
+        PaintLabel(info, GetBackgroundPcx(), text, H3SmallFont::Get(), eTextColor::REGULAR, eTextAlignment::MIDDLE_CENTER);
+        if (shown != ~0u && info) Show(info);
+    }
+    void PaintButton(int i, bool down, bool show = true) {
+        PaintGoldButton(buttons[i], GetBackgroundPcx(), labels[i], i == CancelButton || Enabled(), down);
+        if (show && buttons[i]) Show(buttons[i]);
+    }
+    int ButtonAt(int x, int y) const {
+        for (int i = 0; i < ButtonCount; ++i) {
+            const int bx = ButtonsX + i * (ButtonW + ButtonGap);
+            if (x >= bx && x < bx + ButtonW && y >= ButtonsY && y < ButtonsY + 32) return i;
+        }
+        return -1;
+    }
+    void Focus(bool pass) {
+        onPassword = pass;
+        if (name) { name->SetFocus(pass ? FALSE : TRUE); Show(name); }
+        if (password) password->SetFocus(pass ? TRUE : FALSE);
+        PaintStars(true);
+    }
+    // One star per character of the hidden password edit, and a caret while it has the keys.
+    void PaintStars(bool force = false) {
+        if (!stars || !password) return;
+        const size_t n = strlen(password->GetText());
+        if (!force && n == starsShown && onPassword == caretShown) return;
+        starsShown = n; caretShown = onPassword;
+        auto* pcx = stars->GetPcx();
+        TakeBackground(stars, GetBackgroundPcx());
+        PaintPanel(pcx, FieldW, 22);
+        const std::string text = std::string(n, '*') + (onPassword ? "_" : "");
+        pcx->TextDraw(H3SmallFont::Get(), text.c_str(), 6, 2, FieldW - 12, 18, eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+        Show(stars);
+    }
+    bool Press(int which) {
+        if (which == CancelButton) return true;
+        if (!Enabled()) return false;
+        std::string account = name ? name->GetText() : "", secret = password ? password->GetText() : "";
+        while (!account.empty() && account.back() == ' ') account.pop_back();
+        while (!account.empty() && account.front() == ' ') account.erase(0, 1);
+        if (account.empty()) problem = "Type your account name.";
+        else if (secret.empty()) problem = "Type your password.";
+        else { problem.clear(); waiting = true; hp_lobby_client::SignIn(account, secret, which == RegisterButton); }
+        PaintInfo();
+        return false;
+    }
+    void ShowHint(const std::string& text) {
+        if (!hint || text == hintShown) return;
+        hintShown = text;
+        PaintLabel(hint, GetBackgroundPcx(), text, H3SmallFont::Get(), eTextColor::REGULAR, eTextAlignment::MIDDLE_CENTER);
+        Show(hint);
+    }
+    std::string Hint(int x, int y) const {
+        switch (ButtonAt(x, y)) {
+        case SignInButton: return "Sign in with your account name and password.";
+        case RegisterButton: return snapshot.needs_account ? "Give the player you already are here this name and password."
+                                                           : "Make a new account with this name and password.";
+        case CancelButton: return "Back to the multiplayer menu.";
+        default: break;
+        }
+        if (x >= FieldX && x < FieldX + FieldW && y >= NameY && y < NameY + 22) return "3 to 20 Latin letters, digits, spaces, dots, dashes or underscores.";
+        if (x >= FieldX && x < FieldX + FieldW && y >= PassY && y < PassY + 22) return "At least 6 characters.";
+        return "One account plays your games from any computer.";
     }
 };
 
@@ -578,6 +777,7 @@ LRESULT CALLBACK KeyHook(int code, WPARAM wparam, LPARAM lparam) {
 struct Step { enum Kind { Click, WaitForSessions } kind; UINT16 id; };
 std::deque<Step> steps;
 ULONGLONG waitDeadline = 0;
+std::atomic<bool> hosting{false}; // the lobby's Create opened HotA's host setup over the relay
 bool relabel = false; // after the lobby's TCP/IP click: HotA's "Your IP Address" means nothing for a relay game
 bool buttonDown = false;
 
@@ -600,6 +800,12 @@ bool Activate(const std::string& only) {
 void Begin(H3BaseDlg* dialog, const Choice& choice) {
     if (choice.action == Action::None) return;
     if (!Activate(choice.action == Action::Join ? choice.game : "")) { H3Messagebox("Heroes Post is not connected to its server."); return; }
+    hosting = choice.action == Action::Create;
+    // In a Heroes Post game a player is their account: HotA's player name, read when the connection
+    // is chosen, becomes the account's name. HotA remembers it as its multiplayer name.
+    const auto account = hp_lobby_client::Get().player;
+    if (!account.empty())
+        if (auto* name = dialog->GetH3DlgItem(NameEditId)) { reinterpret_cast<H3DlgEdit*>(name)->SetText(account.c_str()); Show(name); }
     steps.clear();
     if (ConnectionChosen(dialog)) steps.push_back({Step::Click, BackId});
     steps.push_back({Step::Click, TcpIpId});
@@ -647,18 +853,67 @@ void PaintButtonState(H3BaseDlg* dialog, int frame) {
     if (auto* item = dialog->GetPcx16(ButtonId)) { PaintPostButton(item->GetPcx(), frame); Show(item); }
 }
 
+// Our windows are larger than the multiplayer dialog under them. When one closes the engine redraws only
+// the dialogs, and HotA keeps no copy of the main menu's art beneath them (the window manager's backup
+// screen is null), so the window's edges stayed on the menu. The screen is saved before our windows open
+// and put back after each one closes, and the dialogs are then redrawn over it.
+class SavedScreen {
+public:
+    SavedScreen() {
+        auto* screen = Screen();
+        if (!screen || !screen->buffer) return;
+        width = screen->width; height = screen->height; pitch = screen->scanlineSize;
+        pixels.assign(screen->buffer, screen->buffer + static_cast<size_t>(pitch) * height);
+    }
+    void Restore() const {
+        auto* screen = Screen();
+        if (!screen || pixels.empty() || screen->width != width || screen->height != height || screen->scanlineSize != pitch) return;
+        std::copy(pixels.begin(), pixels.end(), screen->buffer);
+        H3WindowManager::Get()->H3Redraw(0, 0, width, height);
+    }
+
+private:
+    static H3LoadedPcx16* Screen() { auto* manager = H3WindowManager::Get(); return manager ? manager->GetDrawBuffer() : nullptr; }
+    std::vector<std::uint8_t> pixels;
+    int width = 0, height = 0, pitch = 0;
+};
+
 void OpenLobby(H3BaseDlg* dialog) {
     std::string player = "Player";
     if (auto* name = dialog->GetH3DlgItem(NameEditId)) {
         const auto& text = reinterpret_cast<H3DlgText*>(name)->GetH3String();
         if (text.Length()) player = text.String();
     }
-    hp_relay::Deactivate();
+    hp_relay::Deactivate(); hosting = false;
+    const SavedScreen under;
     Choice choice;
-    {
-        LobbyDlg lobby(player);
-        lobby.Start();
-        choice = lobby.choice;
+    for (;;) {
+        hp_lobby_client::Open(player); hp_lobby_client::Close();
+        const auto s = hp_lobby_client::Get();
+        if (!s.server.empty() && (!s.signed_in || s.needs_account)) {
+            bool done = false;
+            hp_keeper::Log(s.needs_account ? "Sign-in window (player from before accounts)" : "Sign-in window");
+            {
+                SignInDlg signIn(player);
+                signIn.Start();
+                done = signIn.done;
+            }
+            under.Restore();
+            if (!done) { hp_keeper::Log("Sign-in window cancelled"); break; }
+        }
+        {
+            const auto now = hp_lobby_client::Get();
+            hp_keeper::Log(std::string("Lobby window, ") + (now.online ? "online" : "connecting"));
+            LobbyDlg lobby(player);
+            lobby.Start();
+            choice = lobby.choice;
+        }
+        under.Restore();
+        static const char* const actions[] = {"closed", "Create", "Join", "sign-in needed", "Sign out"};
+        hp_keeper::Log(std::string("Lobby window: ") + actions[static_cast<int>(choice.action)]);
+        if (choice.action == Action::SignOut) hp_lobby_client::SignOut();
+        if (choice.action != Action::SignOut && choice.action != Action::SignIn) break;
+        choice = {};
     }
     dialog->Redraw();
     Begin(dialog, choice);
@@ -677,7 +932,7 @@ INT __fastcall MultiplayerProc(H3BaseDlg* dialog, void*, H3Msg* msg) {
     }
     // The player chose a connection by hand: that is HotA's own DirectPlay again.
     if (msg->command == ItemCommand && msg->subtype == ItemClick && msg->itemId >= 102 && msg->itemId <= 106) {
-        steps.clear(); hp_relay::Deactivate();
+        steps.clear(); hp_relay::Deactivate(); hosting = false;
     }
     const INT result = previous(dialog, msg);
     if (relabel) {
@@ -714,6 +969,20 @@ bool AtAdventureBoundary() noexcept {
     return false;
 }
 void RequestPress(int button) noexcept { devPress.store(button); Wake(); }
+void RequestSignIn(const std::string& account, const std::string& password, bool create) noexcept {
+    try { devAccount = account; devPassword = password; devSignIn.store(create ? 1 : 0); Wake(); } catch (...) {}
+}
+
+// HD fills the PvP options the host's Begin shows (and then sends to every player) from its saved
+// settings: the simultaneous-turn tick, and the end date as the dialog's "month week day" digits and
+// as a day number. Seats can only be saved for leaving and returning during simultaneous turns, so a
+// Heroes Post game starts with them on until the latest date the dialog takes, 9 4 7 (day 252).
+void PvpOptionsLoaded() noexcept {
+    if (!hosting || !hdBase || !hp_relay::Installed()) return;
+    auto* options = reinterpret_cast<volatile std::uint32_t*>(hdBase + 0x210006);
+    options[0] = 8 * 28 + 3 * 7 + 7; options[1] = 1; options[2] = 947;
+    hp_keeper::Log("Simultaneous turns ticked for the host's PvP options");
+}
 
 bool Install(std::uintptr_t hd_base, std::string* error) {
     if (previous) return true;

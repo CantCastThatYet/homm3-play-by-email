@@ -7,6 +7,8 @@ namespace HeroesLobby.Contracts;
 [JsonSerializable(typeof(PlayerInfo))]
 [JsonSerializable(typeof(PlayerCredentials))]
 [JsonSerializable(typeof(RegisterPlayer))]
+[JsonSerializable(typeof(AccountRequest))]
+[JsonSerializable(typeof(AccountInfo))]
 [JsonSerializable(typeof(CreateGame))]
 [JsonSerializable(typeof(JoinGame))]
 [JsonSerializable(typeof(PlayerSettings))]

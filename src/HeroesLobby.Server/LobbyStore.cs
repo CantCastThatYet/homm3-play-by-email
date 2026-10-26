@@ -28,11 +28,10 @@ public sealed partial class LobbyStore
         using var command = db.CreateCommand();
         command.CommandText = """
             PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE);
             CREATE TABLE IF NOT EXISTS games (id TEXT PRIMARY KEY, document TEXT NOT NULL);
-            PRAGMA user_version=1;
             """;
         command.ExecuteNonQuery();
+        InitializeAccounts(db);
         InitializeBranches(db);
     }
 
@@ -49,20 +48,20 @@ public sealed partial class LobbyStore
     {
         var name = Clean(request.DisplayName, "Player name", 32);
         var id = Guid.NewGuid().ToString("N");
-        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         await writeGate.WaitAsync();
         try
         {
-            using var db = Open();
-            using var command = db.CreateCommand();
-            command.CommandText = "INSERT INTO players VALUES ($id, $name, $hash)";
+            using var db = Open(); using var tx = db.BeginTransaction();
+            using var command = db.CreateCommand(); command.Transaction = tx;
+            command.CommandText = "INSERT INTO players (id, name) VALUES ($id, $name)";
             command.Parameters.AddWithValue("$id", id);
             command.Parameters.AddWithValue("$name", name);
-            command.Parameters.AddWithValue("$hash", TokenHash(token));
             command.ExecuteNonQuery();
+            var token = AddToken(db, tx, id);
+            tx.Commit();
+            return new(new(id, name), token);
         }
         finally { writeGate.Release(); }
-        return new(new(id, name), token);
     }
 
     public PlayerInfo Authenticate(string? authorization)
@@ -71,7 +70,7 @@ public sealed partial class LobbyStore
             throw new LobbyError(401, "Reconnect to this server to establish your player identity.");
         using var db = Open();
         using var command = db.CreateCommand();
-        command.CommandText = "SELECT id, name FROM players WHERE token_hash=$hash";
+        command.CommandText = "SELECT p.id, p.name FROM tokens t JOIN players p ON p.id=t.player_id WHERE t.token_hash=$hash";
         command.Parameters.AddWithValue("$hash", TokenHash(authorization[7..]));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) throw new LobbyError(401, "This player identity is no longer valid on this server.");

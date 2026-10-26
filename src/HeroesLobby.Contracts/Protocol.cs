@@ -12,6 +12,11 @@ public record ServerInfo(string Name, int ProtocolVersion, bool GameIntegrationA
 public record PlayerInfo(string Id, string DisplayName);
 public record RegisterPlayer(string DisplayName);
 public record PlayerCredentials(PlayerInfo Player, string Token);
+/// <summary>Signs in to an account, or registers one (POST /api/sessions, POST /api/accounts).</summary>
+public record AccountRequest(string Name, string Password);
+/// <summary>Who a token belongs to (GET /api/account). Name signs in to the account; null for a player made before
+/// accounts, who has no password yet and keeps their games by registering with that token.</summary>
+public record AccountInfo(PlayerInfo Player, string? Name);
 public record CreateGame(string Name, string MapName, int Capacity, string? Password);
 public record JoinGame(string? Password);
 public record PlayerSettings(long Revision, int Color, string Faction, string Hero, string Bonus);

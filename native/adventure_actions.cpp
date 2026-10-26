@@ -20,8 +20,9 @@ std::atomic<std::uint32_t> token{0},native_result{0};
 thread_local bool inside=false;
 thread_local unsigned dispatch_depth=0;
 thread_local bool idle_boundary=false,processing_idle=false;
-Predicate input_gate=nullptr,idle_callback=nullptr;
+Predicate input_gate=nullptr,idle_callback=nullptr,command_gate=nullptr;
 void* input_context=nullptr;
+void* command_context=nullptr;
 void* idle_context=nullptr;
 struct Message { std::uint32_t command,subtype,item,flags,x,y,parameter,parent; };
 static_assert(sizeof(Message)==32,"Native H3Msg ABI");
@@ -77,6 +78,7 @@ unsigned __stdcall MessageHook(HiHook* chain,std::uint32_t self,Message* message
     Message current{};
     const bool real_idle=message&&hp::Read(reinterpret_cast<std::uintptr_t>(message),current)&&current.command==0;
     bool blocked=own_thread&&input_gate&&input_gate(input_context);
+    if(own_thread&&!blocked&&!real_idle&&command_gate&&command_gate(command_context))blocked=true;
     if(own_thread&&!blocked&&dispatch_depth==1&&!inside&&real_idle&&idle_callback) {
         // Before any preceding HD/HotA/native chain. In-poll latching is too late:
         // native408710 can continue into AI/end-turn after its network poll.
@@ -97,7 +99,7 @@ unsigned __stdcall MessageHook(HiHook* chain,std::uint32_t self,Message* message
     if(own_thread&&dispatch_depth==1&&!inside&&status.load()==Status::Queued&&!lock.test_and_set()) {
         if(status.load()==Status::Queued&&GetTickCount64()-queued_at>10000) {
             last_error.store(Error::Expired);status.store(Status::Expired);busy.store(false);
-        } else if(status.load()==Status::Queued&&real_idle) {
+        } else if(status.load()==Status::Queued&&real_idle&&!(command_gate&&command_gate(command_context))) {
             std::uint32_t dialog=0;
             const Error failure=Guard(self,dialog);
             if(failure!=Error::None) {
@@ -168,6 +170,10 @@ bool ConfigureInputGate(Predicate predicate,void* context,std::string* error) no
     if(!installed.load()||GetCurrentThreadId()!=game_thread||dispatch_depth) { ErrorText(error,"adventure_config_requires_idle_installed_game_thread");return false; }
     input_gate=predicate;input_context=context;return true;
 }
+bool ConfigureCommandGate(Predicate predicate,void* context,std::string* error) noexcept {
+    if(!installed.load()||GetCurrentThreadId()!=game_thread||dispatch_depth) { ErrorText(error,"adventure_config_requires_idle_installed_game_thread");return false; }
+    command_gate=predicate;command_context=context;return true;
+}
 bool ConfigureIdleBoundary(Predicate predicate,void* context,std::string* error) noexcept {
     if(!installed.load()||GetCurrentThreadId()!=game_thread||dispatch_depth) { ErrorText(error,"adventure_config_requires_idle_installed_game_thread");return false; }
     idle_callback=predicate;idle_context=context;return true;
@@ -215,7 +221,7 @@ bool Uninstall(std::string* error) noexcept {
     if(dispatch_depth||inside||busy.load()||(game_thread&&GetCurrentThreadId()!=game_thread)) { ErrorText(error,"adventure_uninstall_requires_idle_game_thread");return false; }
     try {
         if(hook&&!hook->Destroy()) { ErrorText(error,"adventure_hook_rollback_failed");return false; }
-        hook=nullptr;installed.store(false);input_gate=nullptr;idle_callback=nullptr;input_context=nullptr;idle_context=nullptr;return true;
+        hook=nullptr;installed.store(false);input_gate=nullptr;idle_callback=nullptr;command_gate=nullptr;input_context=nullptr;idle_context=nullptr;command_context=nullptr;return true;
     }catch(...) { ErrorText(error,"adventure_hook_rollback_exception");return false; }
 }
 }

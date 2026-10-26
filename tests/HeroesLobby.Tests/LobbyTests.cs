@@ -101,7 +101,7 @@ public class LobbyTests
         Assert.Equal(host.Identity.Player.Id, (await http.GetFromJsonAsync<PlayerInfo>("/api/me", cancellationToken: TestContext.Current.CancellationToken))!.Id);
         var restored = await Read(http, game.Id); Assert.True(restored.Members.Single().Ready); Assert.Equal(game.HostId, restored.HostId);
         using var db = new SqliteConnection($"Data Source={database}"); db.Open();
-        using var cmd = db.CreateCommand(); cmd.CommandText = "SELECT token_hash FROM players WHERE id=$id"; cmd.Parameters.AddWithValue("$id", host.Identity.Player.Id);
+        using var cmd = db.CreateCommand(); cmd.CommandText = "SELECT token_hash FROM tokens WHERE player_id=$id"; cmd.Parameters.AddWithValue("$id", host.Identity.Player.Id);
         Assert.NotEqual(host.Identity.Token, (string)cmd.ExecuteScalar()!);
     }
 

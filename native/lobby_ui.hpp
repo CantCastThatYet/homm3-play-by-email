@@ -15,4 +15,8 @@ void RequestPlayers() noexcept;
 void RequestClick() noexcept;
 // Development: the open lobby window acts as if button `button` was pressed (0 Create, 1 Join the selected or first game).
 void RequestPress(int button) noexcept;
+// Development: the open sign-in window signs in (or registers) with this name and password.
+void RequestSignIn(const std::string& account, const std::string& password, bool create) noexcept;
+// Game thread, after HD has loaded its saved PvP options: a Heroes Post host's game gets simultaneous turns.
+void PvpOptionsLoaded() noexcept;
 }
