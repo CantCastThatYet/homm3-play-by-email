@@ -35,13 +35,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = @"
-          **Players:** download HeroesPost-Setup and run it. It finds HotA, checks the version and installs. Then start HotA, open the multiplayer screen and press Heroes Post; the first time it asks for your server's address.
-
-          Works with HotA 1.8.1 and the HD Mod that comes with it. The zip holds the same files for installing by hand (see README.txt inside).
-
-          **Игрокам:** скачайте HeroesPost-Setup и запустите его. Он сам найдёт HotA, проверит версию и установит мод. Затем запустите HotA, откройте экран сетевой игры и нажмите Heroes Post; в первый раз он спросит адрес вашего сервера.
-          "@
+          # The version's CHANGELOG.md section and the install instructions; a tag without a section fails here.
+          $notes = (& ./native/release-notes.ps1 -Version $env:GITHUB_REF_NAME.TrimStart('v')) -join "`n"
           # 0.x versions are the prototype: marked as pre-releases.
           $pre = if ($env:GITHUB_REF_NAME -like 'v0.*') { '--prerelease' } else { $null }
           gh release create $env:GITHUB_REF_NAME (Get-ChildItem artifacts/release -File).FullName --title "Heroes Post $($env:GITHUB_REF_NAME)" --notes $notes $pre
