@@ -1,4 +1,5 @@
 #include "seat_keeper.hpp"
+#include "capture_delta.hpp"
 #include "common.hpp"
 #include "dplay_relay.hpp"
 #include "json_lite.hpp"
@@ -113,8 +114,10 @@ public:
         if (!done && !busy && !p["completionArmed"].truthy()) Ok("experiment_snapshot_next_completion");
         const long long sent = relay["sent"].integer();
         if (sent != lastSent) { lastSent = sent; lastSentChange = now; }
-        // After acting: wait for a pause of two seconds, and at most one capture every ten.
-        const bool acted = sent != sentAtCapture && now - lastCapture >= 10000 && now - lastSentChange >= 2000;
+        // After acting: a capture once the player has paused for a second, at most one every three.
+        // A move costs about half a kilobyte of upload as a difference (Upload); what is not captured
+        // when HotA closes is missing from the seat while the others have it.
+        const bool acted = sent != sentAtCapture && now - lastCapture >= 3000 && now - lastSentChange >= 1000;
         if (!done && idle && !capturing && !writing && (capturedDay != day || acted) && Ok("capture_current_branch")) {
             capturing = true; capturedDay = day; sentAtCapture = sent; lastCapture = now;
         }
@@ -125,6 +128,30 @@ private:
     long long capturedDay = -1, sentAtCapture = -1, lastSent = -1;
     ULONGLONG lastCapture = 0, lastSentChange = 0, sequentialSince = 0, lastFailureNotice = 0;
     bool capturing = false, warnedSequential = false;
+    // The capture the server last stored from this process, the base of the next difference.
+    std::string uploaded, uploadedGame;
+    bool differences = true;
+
+    // As a difference from the last upload when the server has it; otherwise whole.
+    hp_lobby_client::Reply Send(const std::string& instance, const std::string& zip, std::string& how) {
+        // As whoever this HotA joined the game as: another HotA of the same Windows user may have
+        // signed in as another player since, and the server files a capture under its sender's seat.
+        const auto ticket = hp_relay::GameTicket();
+        if (differences && uploadedGame == instance && !uploaded.empty()) {
+            const auto frame = hp_delta::Encode(uploaded, zip);
+            if (!frame.empty() && frame.size() < zip.size() / 2) {
+                auto reply = hp_lobby_client::CallAs(ticket, "POST", "/api/relay/games/" + instance + "/captures/delta", frame,
+                    L"application/octet-stream", 64 * 1024, 120);
+                if (reply.status == 200) { how = ", sent as a " + std::to_string(frame.size()) + "-byte difference"; return reply; }
+                // 404: a server from before differences. 412: it has another capture. 400: it could not
+                // rebuild this one. The whole capture goes instead; other refusals stand.
+                if (reply.status == 404) differences = false;
+                else if (reply.status != 412 && reply.status != 400) return reply;
+                Log("The server took no difference (" + std::to_string(reply.status) + "); sending the whole capture");
+            }
+        }
+        return hp_lobby_client::CallAs(ticket, "POST", "/api/relay/games/" + instance + "/captures", zip, L"application/octet-stream", 64 * 1024, 120);
+    }
 
     void Upload(const std::string& instance, const std::string& manifest) {
         const auto path = Wide(manifest, CP_UTF8);
@@ -136,12 +163,11 @@ private:
             std::ifstream in(path, std::ios::binary); std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             hp_json::Value m; completion = hp_json::Parse(text, m) && m["native_completion"]["observed"].truthy();
         }
-        // As whoever this HotA joined the game as: another HotA of the same Windows user may have
-        // signed in as another player since, and the server files a capture under its sender's seat.
-        const auto reply = hp_lobby_client::CallAs(hp_relay::GameTicket(), "POST", "/api/relay/games/" + instance + "/captures", zip,
-            L"application/octet-stream", 64 * 1024, 120);
+        std::string how;
+        const auto reply = Send(instance, zip, how);
         if (reply.status != 200) { Notice("Your seat could not be saved on the server: " + hp_lobby_client::ProblemText(reply)); return; }
-        Log("Saved " + std::string(completion ? "End Turn" : "current") + " capture (" + std::to_string(zip.size()) + " bytes) of game " + instance);
+        uploaded = zip; uploadedGame = instance;
+        Log("Saved " + std::string(completion ? "End Turn" : "current") + " capture (" + std::to_string(zip.size()) + " bytes" + how + ") of game " + instance);
         if (completion) Notice("Turn ended and saved on the server. You may close HotA: your seat is kept.");
         Prune(directory);
     }

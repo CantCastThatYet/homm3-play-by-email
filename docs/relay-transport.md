@@ -409,14 +409,25 @@ Checked 2026-10-26 with two R24 HotAs and a local server without stand-ins:
 `native/seat_keeper.cpp` does what the app's `SeatKeeper` did, inside the game:
 
 - it arms the End Turn capture;
-- it captures the turn in progress once each new day, and two seconds after the player stops
-  acting, at most every ten seconds;
+- it captures the turn in progress once each new day, and a second after the player stops
+  acting, at most every three seconds. A capture takes 20-40 ms inside HotA on a 72x72 map
+  (`captureStatus` polled every 20 ms, 2026-10-27);
 - it zips the capture folder itself (stored entries) and uploads it to
   `POST /api/relay/games/{id}/captures` with the token its game was opened with. The server files a
   capture under its sender's seat, and the sign-in file belongs to the Windows user: when a second
   HotA signed in as another player, the first one's captures went to that player's seat, and its
   own seat had none to continue from (2026-10-27);
+- after the first upload it sends each capture as a difference from the last one the server
+  stored (`native/capture_delta.cpp`, `POST .../captures/delta`): copies of the old zip and the
+  new bytes, with both zips' SHA-256. The server rebuilds the capture, checks it and stores it as
+  usual. It answers 412 when its latest capture is another one, and the patch then sends the whole
+  capture; a server without the endpoint answers 404, and the patch stops trying;
 - it deletes the process's older capture folders.
+
+Differences, checked 2026-10-27 on Air Supremacy (72x72) with two R24 HotAs and a local server:
+captures of 1.94 MB went as 148-163 bytes when nothing had changed and 1,326-1,472 bytes after a
+hero's move. Red, killed after a move, continued from a capture the server had rebuilt from
+differences, with the hero where it had walked.
 
 A capture of a 72x72 map is about 2.5 MB uncompressed.
 
@@ -577,11 +588,13 @@ restart.
 
 - Leaving and returning stops working once simultaneous turns end: after day 252, or when
   players come into contact. A host who unticks them in the PvP options gets a game without them.
-- Captures are uploaded uncompressed (2.5 MB on a 72x72 map, at most every ten seconds while
-  acting).
+- The first capture of a process, and any the server cannot take as a difference, is uploaded
+  whole and uncompressed (2 to 2.5 MB on a 72x72 map).
 - A player who quits mid-turn still loses what they did since the last capture (at most about
-  ten seconds plus a pause). The relay now delivers those actions only once, but the resumed
-  world lacks them.
+  four seconds). The relay now delivers those actions only once, but the resumed world lacks them.
+- The host, continued mid-turn, cannot end the turn: HotA's End Turn button stays disabled
+  (`end_turn_button_not_enabled_visible_active`). Patch 0.1.4 does the same; a guest continued
+  mid-turn can. Found 2026-10-27, not yet investigated.
 - Finished or abandoned games are never removed from the relay or its state folder.
 - Stand-ins still run in the server's own HotA copies and their windows are still visible. They
   are needed for a day to advance while a player is away.

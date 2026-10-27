@@ -81,6 +81,20 @@ std::string Sha256(const std::wstring& p) {
     std::ostringstream o; for (auto c : digest) o << std::hex << std::setw(2) << std::setfill('0') << unsigned(c);
     return o.str();
 }
+bool Sha256(const void* data, size_t size, unsigned char digest[32]) {
+    BCRYPT_ALG_HANDLE alg = nullptr; BCRYPT_HASH_HANDLE hash = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) return false;
+    bool ok = BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) >= 0;
+    const auto* p = static_cast<const unsigned char*>(data);
+    while (ok && size) {
+        const ULONG n = size > 0x10000000 ? 0x10000000 : static_cast<ULONG>(size);
+        ok = BCryptHashData(hash, const_cast<PUCHAR>(p), n, 0) >= 0; p += n; size -= n;
+    }
+    if (ok) ok = BCryptFinishHash(hash, digest, 32, 0) >= 0;
+    if (hash) BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return ok;
+}
 std::uint64_t CreationTime(HANDLE p) {
     FILETIME c{}, e{}, k{}, u{};
     if (!GetProcessTimes(p, &c, &e, &k, &u)) return 0;

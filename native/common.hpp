@@ -30,6 +30,8 @@ std::wstring ContinueTag();
 std::wstring HandoffPath(const std::wstring& folder, const std::wstring& tag, const wchar_t* name);
 bool Within(const std::wstring& child, const std::wstring& directory);
 std::string Sha256(const std::wstring& path);
+// The raw SHA-256 digest of bytes in memory.
+bool Sha256(const void* data, size_t size, unsigned char digest[32]);
 std::uint64_t CreationTime(HANDLE process);
 std::wstring PipeName(DWORD pid);
 std::string Error(const std::string& code, const std::string& message);

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 using HeroesLobby.Contracts;
 
@@ -7,7 +8,7 @@ namespace HeroesLobby.Server.Relay;
 
 /// <summary>A stored capture of one relay seat, the state a stand-in or returning player resumes from.</summary>
 public sealed record RelayCapture(string Path, string Kind, int Color, int Day, int Week, int Month,
-    long Consumed, long Sent, string MapFile, string Source, DateTimeOffset Stored);
+    long Consumed, long Sent, string MapFile, string Source, DateTimeOffset Stored, string Sha256 = "");
 
 /// <summary>
 /// Latest captures per relay seat, uploaded by players' apps and by stand-ins. Files live under
@@ -30,9 +31,11 @@ public sealed class RelayCaptures(IConfiguration config, ILogger<RelayCaptures> 
         {
             try
             {
-                var capture = Inspect(File.ReadAllBytes(path)) with
+                var bytes = File.ReadAllBytes(path);
+                var capture = Inspect(bytes) with
                 {
-                    Path = path, Source = System.IO.Path.GetFileNameWithoutExtension(path).Split('-').Last(), Stored = File.GetLastWriteTimeUtc(path)
+                    Path = path, Source = System.IO.Path.GetFileNameWithoutExtension(path).Split('-').Last(), Stored = File.GetLastWriteTimeUtc(path),
+                    Sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes))
                 };
                 return latest.GetOrAdd((game, seat), capture);
             }
@@ -59,7 +62,7 @@ public sealed class RelayCaptures(IConfiguration config, ILogger<RelayCaptures> 
             var temporary = path + ".pending";
             File.WriteAllBytes(temporary, bundle);
             File.Move(temporary, path);
-            capture = capture with { Path = path, Source = source, Stored = DateTimeOffset.UtcNow };
+            capture = capture with { Path = path, Source = source, Stored = DateTimeOffset.UtcNow, Sha256 = Convert.ToHexStringLower(SHA256.HashData(bundle)) };
             latest[(game, seat)] = capture;
             foreach (var old in Directory.GetFiles(folder, "*.hpcap").OrderDescending().Skip(Kept))
                 try { File.Delete(old); } catch (IOException) { }
@@ -133,6 +136,27 @@ public static class RelayEndpoints
             await context.Request.Body.CopyToAsync(body, context.RequestAborted);
             try { var capture = captures.Store(id, seat.Id, body.ToArray(), "player"); return Results.Ok(new { capture.Kind, capture.Consumed }); }
             catch (InvalidDataException error) { throw new LobbyError(400, "Invalid capture: " + error.Message); }
+        });
+
+        // The same capture as a difference from the seat's latest one, which the client names by checksum.
+        // 412 asks for the whole capture: the server has another latest one (a restart, another process).
+        app.MapPost("/api/relay/games/{id:guid}/captures/delta", async (Guid id, HttpContext context, LobbyStore lobby, RelayHub hub, RelayCaptures captures) =>
+        {
+            var player = Who(context, lobby);
+            var (_, seat) = Mine(hub, id, player);
+            if (seat.StandIn) throw new LobbyError(409, "A stand-in is playing this seat.");
+            using var body = new MemoryStream();
+            await context.Request.Body.CopyToAsync(body, context.RequestAborted);
+            try
+            {
+                var delta = CaptureDelta.Read(body.ToArray(), NativeCaptureArchive.MaxBytes);
+                var latest = captures.Latest(id, seat.Id);
+                if (latest is null || latest.Sha256 != delta.BaseSha256)
+                    throw new LobbyError(412, "The server has another capture of this seat; send the whole capture.");
+                var capture = captures.Store(id, seat.Id, delta.Apply(File.ReadAllBytes(latest.Path)), "player");
+                return Results.Ok(new { capture.Kind, capture.Consumed });
+            }
+            catch (InvalidDataException error) { throw new LobbyError(400, "Invalid capture difference: " + error.Message); }
         });
 
         // Hands a seat back to its player: stops the stand-in after capturing it, then serves the latest capture.

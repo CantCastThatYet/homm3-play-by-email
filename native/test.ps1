@@ -38,6 +38,8 @@ cl /nologo /MP4 /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0601 /I"$nativeRoot" "$nativeRoot\json_lite_test.cpp" "$nativeRoot\json_lite.cpp" /Fe:Native.JsonTest.exe /link /DYNAMICBASE /NXCOMPAT
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0601 /I"$nativeRoot" "$nativeRoot\capture_delta_test.cpp" "$nativeRoot\capture_delta.cpp" "$nativeRoot\common.cpp" /Fe:Native.DeltaTest.exe /link /DYNAMICBASE /NXCOMPAT
+if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0601 /I"$nativeRoot" "$nativeRoot\dplay_relay_test.cpp" "$nativeRoot\dplay_relay.cpp" "$nativeRoot\common.cpp" /Fe:Native.RelayTest.exe /link /DYNAMICBASE /NXCOMPAT
 if errorlevel 1 exit /b 1
 exit /b 0
@@ -71,6 +73,8 @@ if ($LASTEXITCODE -ne 0) { throw "Native solo journal tests failed ($LASTEXITCOD
 if ($LASTEXITCODE -ne 0) { throw "Native resume session tests failed ($LASTEXITCODE)." }
 & (Join-Path $outputRoot 'Native.JsonTest.exe')
 if ($LASTEXITCODE -ne 0) { throw "Native JSON reader tests failed ($LASTEXITCODE)." }
+& (Join-Path $outputRoot 'Native.DeltaTest.exe')
+if ($LASTEXITCODE -ne 0) { throw "Native capture difference tests failed ($LASTEXITCODE)." }
 & (Join-Path $outputRoot 'Native.SoloTransportTest.exe')
 if ($LASTEXITCODE -ne 0) { throw "Native solo transport tests failed ($LASTEXITCODE)." }
 # This script never rebuilds the adapter DLL or injector and never starts the game.
