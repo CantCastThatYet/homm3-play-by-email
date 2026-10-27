@@ -584,6 +584,23 @@ broke the host on its next Continue; the scaffold renamed the player in HD's set
 with the same name could not rejoin; and the server lost track of stored captures across a
 restart.
 
+### A continued turn's buttons
+
+Patches 0.1.0 to 0.1.5 could leave Next Hero, Sleep, Move and End Turn disabled after Continue.
+On 2026-10-27 the host continued mid-turn always had them disabled, and the guest never did. The
+resume refreshes the adventure screen with HD's post-reload routine `011753D0` (`resume_session.cpp`).
+That routine takes a flag in ECX: nonzero enables the four buttons, zero disables them. HD's own
+callers set it explicitly (`xor ecx, ecx` after End Turn, `mov ecx, 1` for an unfinished turn;
+found by scanning R24's calls to it). The patch called it with no argument, so whatever ECX held
+decided. A Frida watchpoint on End Turn's flags caught the disabling write inside that call. The
+patch now passes 1 for a turn in progress and 0 for a finished one; HotA enables the buttons
+itself when the next day starts.
+
+Checked 2026-10-27 with two R24 HotAs and a local server: Red (host) continued mid-turn on day 1
+and on day 2, ended the turn both times, and both players reached days 2 and 3. Red also continued
+from its day-1 End Turn capture after Blue had ended the day, worked through the day change, and
+had its buttons back on day 2.
+
 ### Not yet done
 
 - Leaving and returning stops working once simultaneous turns end: after day 252, or when
@@ -592,9 +609,6 @@ restart.
   whole and uncompressed (2 to 2.5 MB on a 72x72 map).
 - A player who quits mid-turn still loses what they did since the last capture (at most about
   four seconds). The relay now delivers those actions only once, but the resumed world lacks them.
-- The host, continued mid-turn, cannot end the turn: HotA's End Turn button stays disabled
-  (`end_turn_button_not_enabled_visible_active`). Patch 0.1.4 does the same; a guest continued
-  mid-turn can. Found 2026-10-27, not yet investigated.
 - Finished or abandoned games are never removed from the relay or its state folder.
 - Stand-ins still run in the server's own HotA copies and their windows are still visible. They
   are needed for a day to advance while a player is away.

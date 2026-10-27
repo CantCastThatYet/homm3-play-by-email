@@ -203,18 +203,21 @@ bool TryAtAdventureBoundary() noexcept {
         unsigned char humans=0;for(unsigned c=0;c<8;++c)if(b.source.players[c].human)humans|=static_cast<unsigned char>(1u<<c);
         if(!hota_solo_transport::ActivateAtBoundary(b.token,loaded.after.world,loaded.after.local,loaded.after.current,humans,b.roster,&error))throw std::runtime_error(error);
         auto expected=loaded.after;const auto transport=hota_solo_transport::GetSnapshot();for(unsigned c=0;c<8;++c)if(expected.players[c].human)expected.players[c].transport_id=transport.ids[c];
+        // A marker checkpoint precedes EndTurn's tail. Loading its world does
+        // not recreate that call stack or prove a native wait-state continuation.
+        const bool completed=b.kind==1||b.st[0x50+b.color*6+1]!=0;
         Stage("refresh_native_adventure_ui");
         // Same controls/redraw sequence used by HD's post-rollback world reload.
         // No StartTurn, movement reset, day step, or scenario initialization.
-        reinterpret_cast<void(__cdecl*)()>(hd+hp_build::Rva(0x1753d0))();
+        // 011753D0 takes ECX: nonzero enables Next Hero, Sleep, Move and End Turn
+        // (HD passes 1 for an unfinished turn), zero disables them. Called without
+        // it, the leftover ECX decided: a host continued mid-turn could not end it.
+        reinterpret_cast<void(__fastcall*)(int)>(hd+hp_build::Rva(0x1753d0))(completed?0:1);
         reinterpret_cast<void(__thiscall*)(void*,int,int)>(0x417380)(reinterpret_cast<void*>(loaded.after.adventure),1,0);
         Stage("audit_complete_recovery");
         if(!hota_resume::ReleaseAfterRebind(b.token,expected,Authorize,&b,&error))throw std::runtime_error(error);
         if(!hota_session::ReleaseScaffoldGate(b.token,&error))throw std::runtime_error(error);
         if(hp_relay::Rejoining()){AttachNetworkHandler(loaded.after.adventure);RestorePlayerNames(loaded.after.world);CenterOnSelectedHero(loaded.after.adventure,loaded.after.world);}
-        // A marker checkpoint precedes EndTurn's tail. Loading its world does
-        // not recreate that call stack or prove a native wait-state continuation.
-        const bool completed=b.kind==1||b.st[0x50+b.color*6+1]!=0;
         {std::lock_guard<std::mutex> l(mutex);snapshot.verified=true;snapshot.completed_input_held=completed;snapshot.stage=completed?"completed_checkpoint_held":"verified";snapshot.error.clear();queued=Bundle{};}
         owner_world=expected.world;owner_local=expected.local;owner_date=expected.date;
         // A relay rejoin is a live participant: a completed seat answers the
